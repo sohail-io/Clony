@@ -1,0 +1,17 @@
+11-04 11:01:20.484 22511 22541 D ActivityManagerStub: host_capture_permission args=[android.permission.CAMERA, 22511, 10322, 0] result=0
+11-04 11:01:22.172 22511 22896 D ActivityManagerStub: host_capture_permission args=[android.permission.READ_MEDIA_VISUAL_USER_SELECTED, 22511, 10322, 0] result=-1
+11-04 11:01:22.172 22511 22896 D ActivityManagerStub: host_capture_permission args=[android.permission.READ_EXTERNAL_STORAGE, 22511, 10322, 0] result=-1
+11-04 11:01:22.173 22511 22896 D ActivityManagerStub: host_capture_permission args=[android.permission.READ_MEDIA_IMAGES, 22511, 10322, 0] result=-1
+11-04 11:01:22.173 22511 22896 D ActivityManagerStub: host_capture_permission args=[android.permission.READ_MEDIA_AUDIO, 22511, 10322, 0] result=-1
+11-04 11:01:22.173 22511 22896 D ActivityManagerStub: host_capture_permission args=[android.permission.READ_MEDIA_VIDEO, 22511, 10322, 0] result=-1
+11-04 11:01:22.173 22511 22896 D ActivityManagerStub: host_capture_permission args=[android.permission.WRITE_EXTERNAL_STORAGE, 22511, 10322, 0] result=-1
+11-04 11:01:22.174 22511 22896 D ActivityManagerStub: host_capture_permission args=[android.permission.RECORD_AUDIO, 22511, 10322, 0] result=0
+11-04 11:01:22.174 22511 22896 D ActivityManagerStub: host_capture_permission args=[android.permission.ACCESS_MEDIA_LOCATION, 22511, 10322, 0] result=-1
+11-04 11:01:33.260 22511 22542 D ActivityManagerStub: host_capture_permission args=[android.permission.CAMERA, 22511, 10322, 0] result=0
+11-04 11:01:33.261 22511 22542 D ActivityManagerStub: host_capture_permission args=[android.permission.RECORD_AUDIO, 22511, 10322, 0] result=0
+11-04 11:01:33.263 22511 22542 D ActivityManagerStub: host_capture_permission args=[android.permission.READ_MEDIA_IMAGES, 22511, 10322, 0] result=-1
+11-04 11:01:33.263 22511 22542 D ActivityManagerStub: host_capture_permission args=[android.permission.READ_MEDIA_VIDEO, 22511, 10322, 0] result=-1
+11-04 11:01:33.264 22511 22542 D ActivityManagerStub: host_capture_permission args=[android.permission.WRITE_EXTERNAL_STORAGE, 22511, 10322, 0] result=-1
+11-04 11:01:33.265 22511 22542 D ActivityManagerStub: host_capture_permission args=[android.permission.READ_MEDIA_VISUAL_USER_SELECTED, 22511, 10322, 0] result=-1
+11-04 11:01:34.445  1189 29958 I CameraService: CameraService::connect call (PID 22511 "com.clony", camera ID 1) and Camera API version 2
+11-04 11:01:34.498  1189 23447 I CameraService: Start camera streaming for com.clony (PID 22511, UID 10322)

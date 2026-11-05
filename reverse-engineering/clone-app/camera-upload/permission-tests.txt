@@ -1,0 +1,10 @@
+
+com.clony.CapturePermissionRegressionTest:...........
+com.clony.SettingsProviderRegressionTest:....
+com.clony.NewIntentRegressionTest:..
+
+Time: 0.155
+
+OK (17 tests)
+
+

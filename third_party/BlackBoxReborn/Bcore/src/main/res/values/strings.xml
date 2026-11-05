@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="black_box_service_name">:black</string>
+    <string name="app_icon">default icon</string>
+    <string name="clony_opening_copy">Opening copy…</string>
+</resources>
