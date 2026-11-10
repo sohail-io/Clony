@@ -36,6 +36,12 @@ public class NativeCore {
 
     public static native boolean disableResourceLoading();
 
+    public static native int probeProxy(int type, String host, int port, byte[] username, byte[] password);
+    public static native boolean configureProxy(int type, String host, int port, byte[] username, byte[] password);
+
+    /** Applies the virtual copy's build fingerprint to Android's property and Build APIs. */
+    public static native boolean setBuildFingerprint(String fingerprint);
+
     /** Narrow service-cache access, plus read-only Activity FragmentController access. */
     public static native Object getFrameworkService(Object manager, String interfaceName);
     public static native boolean setFrameworkService(Object manager, String interfaceName, Object service);

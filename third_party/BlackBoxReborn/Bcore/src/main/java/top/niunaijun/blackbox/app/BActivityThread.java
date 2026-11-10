@@ -66,10 +66,13 @@ import top.niunaijun.blackbox.core.CrashHandler;
 import top.niunaijun.blackbox.core.IBActivityThread;
 import top.niunaijun.blackbox.core.IOCore;
 import top.niunaijun.blackbox.core.NativeCore;
+import top.niunaijun.blackbox.core.CloneFingerprintStore;
 import top.niunaijun.blackbox.core.env.VirtualRuntime;
 import top.niunaijun.blackbox.core.system.user.BUserHandle;
 import top.niunaijun.blackbox.entity.AppConfig;
 import top.niunaijun.blackbox.entity.am.ReceiverData;
+import top.niunaijun.blackbox.utils.VirtualRuntimeTrace;
+import top.niunaijun.blackbox.utils.VirtualCloneDiagnostics;
 
 import top.niunaijun.blackbox.fake.delegate.AppInstrumentation;
 import top.niunaijun.blackbox.fake.delegate.ContentProviderDelegate;
@@ -181,6 +184,15 @@ public class BActivityThread extends IBActivityThread.Stub {
                     || this.mAppConfig.userId != appConfig.userId || this.mAppConfig.bpid != appConfig.bpid)) {
                 
                 throw new RuntimeException("reject init process: " + appConfig.processName + ", this process is : " + this.mAppConfig.processName);
+            }
+            if (this.mAppConfig != null) {
+                return;
+            }
+            if (!NativeCore.configureProxy(appConfig.proxyType, appConfig.proxyHost, appConfig.proxyPort,
+                    appConfig.proxyUser.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    appConfig.proxyPassword.getBytes(java.nio.charset.StandardCharsets.UTF_8))) {
+                android.os.Process.killProcess(android.os.Process.myPid());
+                throw new IllegalStateException("Proxy transport initialization failed; direct fallback refused");
             }
             this.mAppConfig = appConfig;
             IBinder iBinder = appConfig.token;
@@ -350,6 +362,7 @@ public class BActivityThread extends IBActivityThread.Stub {
     public synchronized void handleBindApplication(String packageName, String processName) {
         if (isInit())
             return;
+        VirtualRuntimeTrace.event("bind_start", packageName, processName, getUserId());
         try {
             CrashHandler.create();
         } catch (Throwable ignored) {
@@ -357,6 +370,8 @@ public class BActivityThread extends IBActivityThread.Stub {
 
         PackageInfo packageInfo = BlackBoxCore.getBPackageManager().getPackageInfo(packageName, PackageManager.GET_PROVIDERS, BActivityThread.getUserId());
         if (packageInfo == null || packageInfo.applicationInfo == null) {
+            VirtualRuntimeTrace.failure("bind_metadata_missing", packageName, processName,
+                    getUserId(), new IllegalStateException("Virtual package metadata unavailable"));
             throw new IllegalStateException("Missing virtual package metadata: " + packageName
                     + " userId=" + getUserId());
         }
@@ -386,6 +401,8 @@ public class BActivityThread extends IBActivityThread.Stub {
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             WebView.setDataDirectorySuffix(getUserId() + ":" + packageName + ":" + processName);
+            VirtualRuntimeTrace.event("webview_data_directory_configured", packageName,
+                    processName, getUserId());
         }
 
         VirtualRuntime.setupRuntime(processName, applicationInfo);
@@ -396,6 +413,12 @@ public class BActivityThread extends IBActivityThread.Stub {
         }
 
         NativeCore.init(Build.VERSION.SDK_INT);
+        String buildFingerprint = CloneFingerprintStore.read(
+                BlackBoxCore.getContext(), packageName, getUserId());
+        boolean fingerprintApplied = NativeCore.setBuildFingerprint(buildFingerprint);
+        if (!fingerprintApplied) {
+            Slog.w(TAG, "Could not apply the virtual build fingerprint for " + packageName);
+        }
         assert packageContext != null;
         IOCore.get().enableRedirect(packageContext);
 
@@ -427,6 +450,8 @@ public class BActivityThread extends IBActivityThread.Stub {
             try {
                 application = BRLoadedApk.get(loadedApk).makeApplication(false, null);
             } catch (Exception makeAppException) {
+                VirtualRuntimeTrace.failureOnce("application_create_primary_failed", packageName,
+                        processName, getUserId(), makeAppException);
                 Slog.e(TAG, "Failed to makeApplication, trying fallback approach", makeAppException);
                 application = null;
             }
@@ -464,6 +489,8 @@ public class BActivityThread extends IBActivityThread.Stub {
                 throw new RuntimeException("Unable to create application - all creation methods failed");
             }
 
+            VirtualRuntimeTrace.registerActivityCallbacks(application, getUserId());
+
             if (BuildCompat.isU()
                     && !top.niunaijun.blackbox.fake.service.ICredentialManagerProxy
                     .installForContext(application)) {
@@ -481,8 +508,16 @@ public class BActivityThread extends IBActivityThread.Stub {
             AppInstrumentation.get().callApplicationOnCreate(application);
             onAfterApplicationOnCreate(packageName, processName, application);
 
+            if (packageName.equals(processName)) {
+                VirtualCloneDiagnostics.start(application, packageName, processName,
+                        getUserId(), buildFingerprint, fingerprintApplied, mAppConfig);
+            }
+
             HookManager.get().checkEnv(HCallbackProxy.class);
+            VirtualRuntimeTrace.event("bind_complete", packageName, processName, getUserId());
         } catch (Exception e) {
+            VirtualRuntimeTrace.failure("bind_application_failed", packageName, processName,
+                    getUserId(), e);
             Slog.e(TAG, "Critical error in handleBindApplication", e);
             throw new RuntimeException("Unable to makeApplication", e);
         }

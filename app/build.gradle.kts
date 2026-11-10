@@ -3,6 +3,9 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val generatedLauncherAssetsDir = layout.buildDirectory.dir("generated/launcher-assets")
+val debugSigningKey = file("${System.getProperty("user.home")}/.android/debug.keystore")
+
 android {
     namespace = "com.clony"
     compileSdk {
@@ -35,6 +38,31 @@ android {
     buildFeatures {
         compose = true
     }
+    sourceSets.getByName("main").assets.directories.add(
+        generatedLauncherAssetsDir.get().asFile.absolutePath
+    )
+}
+
+val generateLauncherAssets = tasks.register<Exec>("generateLauncherAssets") {
+    val launcherScript = rootProject.file("launcher-tools/build_launchers.py")
+    val launcherSource = rootProject.file("launcher-tools/LauncherActivity.java")
+    inputs.files(launcherScript, launcherSource, debugSigningKey)
+    inputs.property("hostPackage", android.defaultConfig.applicationId ?: "com.clony")
+    outputs.dir(generatedLauncherAssetsDir)
+    commandLine(
+        "python3",
+        launcherScript.absolutePath,
+        "--sdk", androidComponents.sdkComponents.sdkDirectory.get().asFile.absolutePath,
+        "--jdk", System.getProperty("java.home"),
+        "--output", generatedLauncherAssetsDir.get().asFile.absolutePath,
+        "--host-package", android.defaultConfig.applicationId ?: "com.clony",
+        "--keystore", debugSigningKey.absolutePath,
+        "--build-tools", "36.1.0"
+    )
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(generateLauncherAssets)
 }
 
 dependencies {

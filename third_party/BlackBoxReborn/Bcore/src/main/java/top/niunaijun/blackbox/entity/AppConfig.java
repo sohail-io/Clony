@@ -18,6 +18,11 @@ public class AppConfig implements Parcelable {
     public int userId;
     public int callingBUid;
     public IBinder token;
+    public int proxyType;
+    public int proxyPort;
+    public String proxyHost = "";
+    public String proxyUser = "";
+    public String proxyPassword = "";
 
     /** Framework-only extras survive Android's system-side intent inspection. */
     public Bundle toBundle() {
@@ -30,6 +35,11 @@ public class AppConfig implements Parcelable {
         bundle.putInt("userId", userId);
         bundle.putInt("callingBUid", callingBUid);
         bundle.putBinder("token", token);
+        bundle.putInt("proxyType", proxyType);
+        bundle.putInt("proxyPort", proxyPort);
+        bundle.putString("proxyHost", proxyHost);
+        bundle.putString("proxyUser", proxyUser);
+        bundle.putString("proxyPassword", proxyPassword);
         return bundle;
     }
 
@@ -43,6 +53,11 @@ public class AppConfig implements Parcelable {
         config.userId = bundle.getInt("userId", -1);
         config.callingBUid = bundle.getInt("callingBUid");
         config.token = bundle.getBinder("token");
+        config.proxyType = bundle.getInt("proxyType", 0);
+        config.proxyPort = bundle.getInt("proxyPort", 0);
+        config.proxyHost = bundle.getString("proxyHost", "");
+        config.proxyUser = bundle.getString("proxyUser", "");
+        config.proxyPassword = bundle.getString("proxyPassword", "");
         return config;
     }
 
@@ -61,6 +76,11 @@ public class AppConfig implements Parcelable {
         dest.writeInt(this.userId);
         dest.writeInt(this.callingBUid);
         dest.writeStrongBinder(token);
+        dest.writeInt(proxyType);
+        dest.writeInt(proxyPort);
+        dest.writeString(proxyHost);
+        dest.writeString(proxyUser);
+        dest.writeString(proxyPassword);
     }
 
     public AppConfig() {
@@ -75,6 +95,11 @@ public class AppConfig implements Parcelable {
         this.userId = in.readInt();
         this.callingBUid = in.readInt();
         this.token = in.readStrongBinder();
+        this.proxyType = in.readInt();
+        this.proxyPort = in.readInt();
+        this.proxyHost = in.readString();
+        this.proxyUser = in.readString();
+        this.proxyPassword = in.readString();
     }
 
     public static final Parcelable.Creator<AppConfig> CREATOR = new Parcelable.Creator<AppConfig>() {

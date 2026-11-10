@@ -18,6 +18,7 @@ import top.niunaijun.blackbox.app.BActivityThread;
 import top.niunaijun.blackbox.fake.service.VirtualDeviceIdentity;
 import top.niunaijun.blackbox.fake.hook.ClassInvocationStub;
 import top.niunaijun.blackbox.utils.Slog;
+import top.niunaijun.blackbox.utils.VirtualRuntimeTrace;
 import top.niunaijun.blackbox.utils.compat.ContextCompat;
 
 
@@ -77,6 +78,9 @@ public class SystemProviderStub extends ClassInvocationStub implements BContentP
                 if (cause instanceof SecurityException && message != null
                         && message.contains("Calling uid")
                         && message.contains("doesn't match source uid")) {
+                    VirtualRuntimeTrace.failure("settings_provider_attribution_rejected",
+                            getVirtualPackageName(), BActivityThread.getAppProcessName(),
+                            getVirtualUserId(), cause);
                     Slog.w("SystemProviderStub", "Settings provider rejected virtual attribution; "
                             + "handling " + describeCall(args) + " through the safe fallback");
                     return replaceAndroidIdCallResult(args, rejectedCallResult(args));
@@ -109,15 +113,14 @@ public class SystemProviderStub extends ClassInvocationStub implements BContentP
     }
 
     private Object replaceAndroidIdCallResult(Object[] args, Object result) {
-        if (!(result instanceof Bundle) || !isAndroidIdCall(args)) return result;
-        Bundle providerResult = (Bundle) result;
+        if (!isAndroidIdCall(args)) return result;
         String packageName = getVirtualPackageName();
         String androidId = VirtualDeviceIdentity.getAndroidId(
                 getIdentityContext(), packageName, getVirtualUserId());
-        if (androidId == null) return result;
 
-        Bundle virtualResult = new Bundle(providerResult);
-        virtualResult.putString("value", androidId);
+        Bundle virtualResult = result instanceof Bundle ? new Bundle((Bundle) result) : new Bundle();
+        // Never pass through the host device's Android ID if private ID storage fails.
+        virtualResult.putString("value", androidId == null ? "" : androidId);
         logIdentityHook("settings_secure_android_id", packageName, getVirtualUserId());
         return virtualResult;
     }
@@ -127,7 +130,6 @@ public class SystemProviderStub extends ClassInvocationStub implements BContentP
         String packageName = getVirtualPackageName();
         String androidId = VirtualDeviceIdentity.getAndroidId(
                 getIdentityContext(), packageName, getVirtualUserId());
-        if (androidId == null) return result;
 
         Cursor cursor = (Cursor) result;
         int valueColumn = cursor.getColumnIndex("value");
@@ -139,7 +141,7 @@ public class SystemProviderStub extends ClassInvocationStub implements BContentP
             public String getString(int columnIndex) {
                 if (columnIndex == valueColumn && getPosition() >= 0 && getPosition() < getCount()) {
                     if (nameColumn < 0 || "android_id".equalsIgnoreCase(super.getString(nameColumn))) {
-                        return androidId;
+                        return androidId == null ? "" : androidId;
                     }
                 }
                 return super.getString(columnIndex);
@@ -218,8 +220,10 @@ public class SystemProviderStub extends ClassInvocationStub implements BContentP
     }
 
     private void logIdentityHook(String hook, String packageName, int userId) {
+        VirtualRuntimeTrace.event("identity_" + hook, packageName,
+                BActivityThread.getAppProcessName(), userId);
         Slog.d("SystemProviderStub", "virtual_identity hook=" + hook
-                + " package=" + packageName + " userId=" + userId + " source=clone_seed");
+                + " package=" + packageName + " userId=" + userId + " source=clone_private_store");
     }
 
     static Bundle rejectedCallResult(Object[] args) {
@@ -263,11 +267,17 @@ public class SystemProviderStub extends ClassInvocationStub implements BContentP
                 for (int i = 0; i < args.length; i++) {
                     if (args[i] != null && sourceClass.isInstance(args[i])) {
                         args[i] = hostSource;
+                        VirtualRuntimeTrace.eventOnce("settings_attribution_rewritten",
+                                BActivityThread.getAppPackageName(), BActivityThread.getAppProcessName(),
+                                BActivityThread.getUserId());
                         Slog.d("SystemProviderStub", "Replaced settings AttributionSource at arg " + i);
                     }
                 }
                 return;
             } catch (Throwable error) {
+                VirtualRuntimeTrace.failureOnce("settings_attribution_rewrite_failed",
+                        BActivityThread.getAppPackageName(), BActivityThread.getAppProcessName(),
+                        BActivityThread.getUserId(), error);
                 // Fall back to the legacy state repair on Android versions or
                 // provider signatures that do not expose the public builder.
                 Slog.w("SystemProviderStub", "Could not rebuild settings AttributionSource: "

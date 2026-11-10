@@ -54,6 +54,14 @@ public class ProcessRecord extends Binder {
         config.callingBUid = callingBUid;
         config.userId = userId;
         config.token = this;
+        top.niunaijun.blackbox.core.network.CloneProxyConfig proxy =
+                top.niunaijun.blackbox.core.network.CloneProxyStore.read(
+                        top.niunaijun.blackbox.BlackBoxCore.getContext(), info.packageName, userId);
+        config.proxyType = proxy.type;
+        config.proxyPort = proxy.port;
+        config.proxyHost = proxy.host;
+        config.proxyUser = proxy.username;
+        config.proxyPassword = proxy.password;
         return config;
     }
 

@@ -6,13 +6,16 @@ import android.content.Context
 import android.os.SystemClock
 import android.util.Log
 import top.niunaijun.blackbox.BlackBoxCore
+import top.niunaijun.blackbox.app.BActivityThread
 import top.niunaijun.blackbox.app.configuration.AppLifecycleCallback
 import top.niunaijun.blackbox.app.configuration.ClientConfiguration
+import top.niunaijun.blackbox.utils.VirtualRuntimeTrace
 import top.niunaijun.blackbox.utils.SimpleCrashFix
 
 private const val TRACE_TAG = "ClonyTrace"
 
 private fun logVirtualActivity(event: String, activity: Activity) {
+    VirtualRuntimeTrace.activity(event, activity, BActivityThread.getUserId())
     Log.i(
         TRACE_TAG,
         "virtualActivity=" + event +

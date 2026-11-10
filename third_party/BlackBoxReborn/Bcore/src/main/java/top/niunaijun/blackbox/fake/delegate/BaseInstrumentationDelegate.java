@@ -28,6 +28,7 @@ import top.niunaijun.blackbox.app.VirtualAccountActivityRouter;
 import top.niunaijun.blackbox.app.VirtualActivityResolver;
 import top.niunaijun.blackbox.app.configuration.AppLifecycleCallback;
 import top.niunaijun.blackbox.utils.Reflector;
+import top.niunaijun.blackbox.utils.VirtualRuntimeTrace;
 
 public class BaseInstrumentationDelegate extends Instrumentation {
 
@@ -560,6 +561,9 @@ public class BaseInstrumentationDelegate extends Instrumentation {
             int result = BlackBoxCore.getBActivityManager().startActivityAms(
                     BActivityThread.getUserId(), virtualIntent, resolvedType, resultTo,
                     resultWho, requestCode, virtualIntent.getFlags(), options);
+            VirtualRuntimeTrace.activityDispatch("activity_dispatch",
+                    resolveInfo.activityInfo.packageName, resolveInfo.activityInfo.name,
+                    BActivityThread.getUserId(), result >= 0);
             if (result < 0) {
                 android.util.Log.w(TAG, "Virtual activity dispatch returned " + result
                         + " for " + resolveInfo.activityInfo.packageName + "/"

@@ -21,6 +21,7 @@ import top.niunaijun.blackbox.fake.hook.ScanClass;
 import top.niunaijun.blackbox.fake.hook.MethodHook;
 import top.niunaijun.blackbox.fake.hook.ProxyMethod;
 import top.niunaijun.blackbox.utils.Slog;
+import top.niunaijun.blackbox.utils.VirtualRuntimeTrace;
 
 
 @ScanClass(VpnCommonProxy.class)
@@ -337,6 +338,9 @@ public class IConnectivityManagerProxy extends BinderInvocationStub {
                 boolean rewritten = rewriteVirtualCallerPackage(
                         forwarded, virtualPackage, top.niunaijun.blackbox.BlackBoxCore.getHostPkg());
                 if (virtualPackage != null) {
+                    VirtualRuntimeTrace.eventOnce("network_capabilities_query", virtualPackage,
+                            top.niunaijun.blackbox.app.BActivityThread.getAppProcessName(),
+                            top.niunaijun.blackbox.app.BActivityThread.getUserId());
                     Slog.d(TAG, "getNetworkCapabilities route package=" + virtualPackage
                             + " user=" + top.niunaijun.blackbox.app.BActivityThread.getUserId()
                             + " hostPackage=" + (rewritten
@@ -347,8 +351,16 @@ public class IConnectivityManagerProxy extends BinderInvocationStub {
                 try {
                     result = method.invoke(who, forwarded);
                 } catch (InvocationTargetException error) {
+                    VirtualRuntimeTrace.failureOnce("network_capabilities_query_failed", virtualPackage,
+                            top.niunaijun.blackbox.app.BActivityThread.getAppProcessName(),
+                            top.niunaijun.blackbox.app.BActivityThread.getUserId(), error.getCause());
                     throw error.getCause();
                 }
+                VirtualRuntimeTrace.eventOnce(result == null
+                                ? "network_capabilities_result_null"
+                                : "network_capabilities_result_available",
+                        virtualPackage, top.niunaijun.blackbox.app.BActivityThread.getAppProcessName(),
+                        top.niunaijun.blackbox.app.BActivityThread.getUserId());
                 if (result != null) {
                     try {
                         Method addCapabilityMethod = result.getClass().getMethod("addCapability", int.class);

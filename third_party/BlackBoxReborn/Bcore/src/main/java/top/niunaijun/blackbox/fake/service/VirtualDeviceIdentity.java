@@ -13,7 +13,9 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.util.concurrent.ConcurrentHashMap;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -22,26 +24,166 @@ import top.niunaijun.blackbox.utils.Slog;
 
 /**
  * Provides stable, clone-scoped identifiers without exposing host hardware IDs.
- * The installation seed lives in the host app's no-backup private storage.
+ * Random Android IDs and the telephony derivation seed live in no-backup storage.
  */
 public final class VirtualDeviceIdentity {
     private static final String TAG = "VirtualDeviceIdentity";
     private static final String SEED_FILE_NAME = "virtual-device-identity.seed";
     private static final String LOCK_FILE_NAME = "virtual-device-identity.lock";
+    private static final String ANDROID_ID_LOCK_FILE_NAME = "virtual-android-id.lock";
+    private static final String ANDROID_ID_FILE_PREFIX = "virtual-android-id-";
     private static final String HMAC_ALGORITHM = "HmacSHA256";
     private static final int SEED_LENGTH_BYTES = 32;
     private static final int ANDROID_ID_LENGTH = 16;
 
     private static final Object SEED_LOCK = new Object();
+    private static final Object ANDROID_ID_LOCK = new Object();
     private static volatile byte[] sSeed;
+    private static final ConcurrentHashMap<String, String> sAndroidIds = new ConcurrentHashMap<>();
 
     private VirtualDeviceIdentity() {
     }
 
     public static String getAndroidId(Context context, String packageName, int userId) {
-        byte[] digest = derive(context, packageName, userId, "android_id");
-        if (digest == null) return null;
-        return toHex(digest, ANDROID_ID_LENGTH / 2);
+        return getOrCreateAndroidId(context, packageName, userId, false, true);
+    }
+
+    /** Creates a fresh random Android ID at clone creation, replacing any stale value. */
+    public static String createAndroidId(Context context, String packageName, int userId) {
+        return getOrCreateAndroidId(context, packageName, userId, true, false);
+    }
+
+    private static String getOrCreateAndroidId(
+            Context context, String packageName, int userId,
+            boolean forceRandom, boolean preserveLegacyValue) {
+        if (context == null || packageName == null || packageName.isEmpty() || userId < 0) {
+            return null;
+        }
+        String cloneKey = packageName + ":" + userId;
+        synchronized (ANDROID_ID_LOCK) {
+            String cached = sAndroidIds.get(cloneKey);
+            if (!forceRandom && cached != null) return cached;
+            if (forceRandom) sAndroidIds.remove(cloneKey);
+            String generatedOrStored = readOrCreateAndroidId(
+                    context, packageName, userId, forceRandom, preserveLegacyValue);
+            if (generatedOrStored != null) sAndroidIds.put(cloneKey, generatedOrStored);
+            return generatedOrStored;
+        }
+    }
+
+    /** Removes the generated value after its virtual user is deleted. */
+    public static boolean deleteAndroidId(Context context, String packageName, int userId) {
+        if (context == null || packageName == null || packageName.isEmpty() || userId < 0) {
+            return false;
+        }
+        String cloneKey = packageName + ":" + userId;
+        synchronized (ANDROID_ID_LOCK) {
+            sAndroidIds.remove(cloneKey);
+            try {
+                File directory = context.getNoBackupFilesDir();
+                if (directory == null || !directory.exists()) return true;
+                File lockPath = new File(directory, ANDROID_ID_LOCK_FILE_NAME);
+                File androidIdPath = androidIdFile(directory, packageName, userId);
+                try (RandomAccessFile lockFile = new RandomAccessFile(lockPath, "rw")) {
+                    FileChannel channel = lockFile.getChannel();
+                    try (FileLock ignored = channel.lock()) {
+                        new AtomicFile(androidIdPath).delete();
+                    }
+                }
+                return true;
+            } catch (IOException | SecurityException | GeneralSecurityException
+                    | java.nio.channels.OverlappingFileLockException error) {
+                Slog.w(TAG, "Could not remove a clone Android ID: "
+                        + error.getClass().getSimpleName());
+                return false;
+            }
+        }
+    }
+
+    private static String readOrCreateAndroidId(
+            Context context, String packageName, int userId,
+            boolean forceRandom, boolean preserveLegacyValue) {
+        try {
+            File directory = context.getNoBackupFilesDir();
+            if (directory == null || (!directory.exists() && !directory.mkdirs())) {
+                Slog.w(TAG, "Could not open private Android ID storage");
+                return null;
+            }
+
+            File lockPath = new File(directory, ANDROID_ID_LOCK_FILE_NAME);
+            File androidIdPath = androidIdFile(directory, packageName, userId);
+            try (RandomAccessFile lockFile = new RandomAccessFile(lockPath, "rw")) {
+                FileChannel channel = lockFile.getChannel();
+                try (FileLock ignored = channel.lock()) {
+                    AtomicFile atomicFile = new AtomicFile(androidIdPath);
+                    if (!forceRandom) {
+                        String existing = readAndroidId(atomicFile);
+                        if (isAndroidId(existing)) return existing;
+                    }
+
+                    String generated = null;
+                    if (preserveLegacyValue) {
+                        byte[] legacyDigest = derive(context, packageName, userId, "android_id");
+                        if (legacyDigest != null) {
+                            generated = toHex(legacyDigest, ANDROID_ID_LENGTH / 2);
+                        }
+                    }
+                    if (generated == null) {
+                        byte[] randomBytes = new byte[ANDROID_ID_LENGTH / 2];
+                        new SecureRandom().nextBytes(randomBytes);
+                        generated = toHex(randomBytes, randomBytes.length);
+                    }
+                    FileOutputStream output = atomicFile.startWrite();
+                    try {
+                        output.write(generated.getBytes(StandardCharsets.US_ASCII));
+                        atomicFile.finishWrite(output);
+                    } catch (IOException error) {
+                        atomicFile.failWrite(output);
+                        throw error;
+                    }
+                    return generated;
+                }
+            }
+        } catch (IOException | SecurityException | GeneralSecurityException
+                | java.nio.channels.OverlappingFileLockException error) {
+            Slog.w(TAG, "Could not create a clone Android ID: "
+                    + error.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    private static String readAndroidId(AtomicFile atomicFile) throws IOException {
+        try (FileInputStream input = atomicFile.openRead()) {
+            byte[] value = new byte[ANDROID_ID_LENGTH];
+            int offset = 0;
+            while (offset < value.length) {
+                int count = input.read(value, offset, value.length - offset);
+                if (count < 0) return null;
+                offset += count;
+            }
+            if (input.read() != -1) return null;
+            String androidId = new String(value, StandardCharsets.US_ASCII);
+            return isAndroidId(androidId) ? androidId : null;
+        } catch (FileNotFoundException missing) {
+            return null;
+        }
+    }
+
+    private static boolean isAndroidId(String value) {
+        if (value == null || value.length() != ANDROID_ID_LENGTH) return false;
+        for (int i = 0; i < value.length(); i++) {
+            char character = value.charAt(i);
+            if (!((character >= '0' && character <= '9')
+                    || (character >= 'a' && character <= 'f'))) return false;
+        }
+        return true;
+    }
+
+    private static File androidIdFile(File directory, String packageName, int userId)
+            throws GeneralSecurityException {
+        byte[] key = (packageName + "\u0000" + userId).getBytes(StandardCharsets.UTF_8);
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(key);
+        return new File(directory, ANDROID_ID_FILE_PREFIX + toHex(digest, digest.length));
     }
 
     /**
@@ -186,6 +328,9 @@ public final class VirtualDeviceIdentity {
     static void clearProcessCacheForTesting() {
         synchronized (SEED_LOCK) {
             sSeed = null;
+        }
+        synchronized (ANDROID_ID_LOCK) {
+            sAndroidIds.clear();
         }
     }
 }

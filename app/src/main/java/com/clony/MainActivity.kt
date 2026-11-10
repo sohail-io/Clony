@@ -72,12 +72,15 @@ import androidx.core.graphics.drawable.IconCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.activity.result.contract.ActivityResultContracts
 import com.clony.ui.theme.ClonyTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.niunaijun.blackbox.BlackBoxCore
+import top.niunaijun.blackbox.core.CloneFingerprintStore
+import top.niunaijun.blackbox.fake.service.VirtualDeviceIdentity
 import java.util.Locale
 import java.util.UUID
 
@@ -98,7 +101,9 @@ data class AppTile(
     val virtualUserId: Int? = null,
     val copyNumber: Int? = null,
     val copyCount: Int = 0,
-    val hasSplitApks: Boolean = false
+    val hasSplitApks: Boolean = false,
+    val launcherPackage: String? = null,
+    val launcherInstalled: Boolean = false
 ) {
     val isCloned: Boolean get() = virtualUserId != null
     val displayName: String
@@ -106,6 +111,34 @@ data class AppTile(
 }
 
 class MainActivity : ComponentActivity() {
+    private var launcherQueue = LauncherInstallQueue()
+    private var waitingForInstallPermission = false
+    private val launcherPermissionResult = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        waitingForInstallPermission = false
+        if (canInstallLaunchers()) {
+            advanceLauncherQueue()
+        } else {
+            launcherQueue.complete(false)
+            showInfo("Copies were created. Allow installs from Clony, then choose Install launcher to add their app icons.")
+        }
+    }
+    private val launcherInstallResult = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        val current = launcherQueue.active
+        val installed = current != null && CloneLaunchers.isInstalled(this, current)
+        launcherQueue.complete(installed)
+        refreshApps()
+        if (installed) {
+            if (launcherQueue.pending.isEmpty()) showInfo("Copy app icons installed. Each one opens its assigned copy.")
+            else advanceLauncherQueue()
+        } else {
+            showInfo("The copy was created, but its app icon wasn't installed. Use Install launcher to try again.")
+        }
+    }
+
     private val appsState = mutableStateOf<List<AppTile>>(emptyList())
     private val runtimeReadyState = mutableStateOf(false)
     private val messageState = mutableStateOf<String?>(null)
@@ -127,6 +160,13 @@ class MainActivity : ComponentActivity() {
         val fromLegacyCloneShortcut = intent?.action == ACTION_OPEN_CLONE
         if (fromLegacyCloneShortcut) setTheme(android.R.style.Theme_NoDisplay)
         super.onCreate(savedInstanceState)
+        if (savedInstanceState != null) {
+            launcherQueue = LauncherInstallQueue(
+                savedInstanceState.getStringArrayList("launcher_pending") ?: arrayListOf(),
+                savedInstanceState.getString("launcher_active")
+            )
+            waitingForInstallPermission = savedInstanceState.getBoolean("launcher_permission")
+        }
         logLifecycle("onCreate")
         if (fromLegacyCloneShortcut) {
             Log.i(TRACE_TAG, "shortcut_dispatch stage=forward package=" + intent?.getStringExtra(EXTRA_CLONE_PACKAGE) +
@@ -156,10 +196,66 @@ class MainActivity : ComponentActivity() {
                     onOpenClone = ::openClone,
                     onCreateCopies = ::createCopies,
                     onPinClone = ::pinCloneShortcut,
+                    onInstallLauncher = ::installLauncher,
+                    onFingerprintSettings = ::saveFingerprint,
                     onDeleteClone = ::deleteClone
                 )
             }
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putStringArrayList("launcher_pending", ArrayList(launcherQueue.pending))
+        outState.putString("launcher_active", launcherQueue.active)
+        outState.putBoolean("launcher_permission", waitingForInstallPermission)
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun canInstallLaunchers() =
+        android.os.Build.VERSION.SDK_INT < 26 || packageManager.canRequestPackageInstalls()
+
+    private fun advanceLauncherQueue() {
+        if (waitingForInstallPermission || launcherQueue.active != null) return
+        launcherQueue.pending.removeAll { CloneLaunchers.isInstalled(this, it) }
+        if (launcherQueue.pending.isEmpty()) return
+        try {
+            if (!canInstallLaunchers()) {
+                waitingForInstallPermission = true
+                launcherPermissionResult.launch(
+                    Intent(
+                        android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        android.net.Uri.parse("package:$packageName")
+                    )
+                )
+                return
+            }
+            val next = launcherQueue.startNext { CloneLaunchers.isInstalled(this, it) } ?: return
+            launcherInstallResult.launch(CloneLaunchers.installIntent(this, next))
+        } catch (error: Exception) {
+            waitingForInstallPermission = false
+            launcherQueue.complete(false)
+            showError("Copies were created, but their app icon setup couldn't start: ${error.message.orEmpty()}", null)
+        }
+    }
+
+    private fun installCreatedLaunchers(packageName: String, userIds: List<Int>) {
+        try {
+            val packages = userIds.map { userId ->
+                CloneLaunchers.assign(this, packageName, userId)
+                    ?: error("All 100 copy app slots have been used.")
+            }
+            launcherQueue.add(packages)
+            advanceLauncherQueue()
+        } catch (error: Exception) {
+            showError("The copies were created, but app icon setup failed: ${error.message.orEmpty()}", null)
+        }
+    }
+
+    private fun installLauncher(tile: AppTile) {
+        val launcher = tile.launcherPackage
+            ?: return showError("No app icon slot is available for this copy.", null)
+        launcherQueue.add(listOf(launcher))
+        advanceLauncherQueue()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -288,7 +384,9 @@ class MainActivity : ComponentActivity() {
                         .groupBy { it.applicationInfo.packageName }
                         .flatMap { (packageName, activities) ->
                             val activity = activities.firstOrNull() ?: return@flatMap emptyList()
-                            if (packageName == this@MainActivity.packageName) return@flatMap emptyList()
+                            if (packageName == this@MainActivity.packageName || LauncherRegistry.slot(packageName) != null) {
+                                return@flatMap emptyList()
+                            }
                             runCatching {
                                 val label = activity.label?.toString()?.takeIf(String::isNotBlank) ?: packageName
                                 val icon = activity.getIcon(0).toBitmap(128, 128).asImageBitmap()
@@ -309,11 +407,14 @@ class MainActivity : ComponentActivity() {
                                     )
                                 } else {
                                     copyUserIds.mapIndexed { index, userId ->
+                                        val launcher = CloneLaunchers.assign(this@MainActivity, packageName, userId)
                                         AppTile(
                                             packageName = packageName,
                                             label = label,
                                             icon = icon,
                                             virtualUserId = userId,
+                                            launcherPackage = launcher,
+                                            launcherInstalled = launcher != null && CloneLaunchers.isInstalled(this@MainActivity, launcher),
                                             copyNumber = index + 1,
                                             copyCount = copyUserIds.size,
                                             hasSplitApks = hasSplitApks
@@ -467,16 +568,60 @@ class MainActivity : ComponentActivity() {
                     Log.i(TRACE_TAG, "clone_delete stage=delete_user_begin package=${tile.packageName} userId=$userId")
                     runtime.deleteUser(userId)
                     Log.i(TRACE_TAG, "clone_delete stage=delete_user_complete package=${tile.packageName} userId=$userId")
+                    runCatching {
+                        top.niunaijun.blackbox.core.network.CloneProxyStore.delete(
+                            this@MainActivity, tile.packageName, userId
+                        )
+                    }.onFailure {
+                        Log.w(TRACE_TAG, "clone_delete stage=proxy_settings_cleanup_failed package=${tile.packageName} userId=$userId", it)
+                    }
+                    runCatching {
+                        CloneFingerprintStore.write(this@MainActivity, tile.packageName, userId, null)
+                    }.onFailure {
+                        Log.w(TRACE_TAG, "clone_delete stage=fingerprint_cleanup_failed package=${tile.packageName} userId=$userId", it)
+                    }
+                    if (!VirtualDeviceIdentity.deleteAndroidId(this@MainActivity, tile.packageName, userId)) {
+                        Log.w(TRACE_TAG, "clone_delete stage=android_id_cleanup_failed package=${tile.packageName} userId=$userId")
+                    }
                 }
                 Log.i(TRACE_TAG, "clone_delete stage=shortcut_cleanup_begin package=${tile.packageName} userId=$userId")
                 CloneShortcutCleanup.removeForClone(this@MainActivity, tile.packageName, userId)
                 Log.i(TRACE_TAG, "clone_delete stage=shortcut_cleanup_complete package=${tile.packageName} userId=$userId")
+                CloneLaunchers.remove(this@MainActivity, tile.packageName, userId)
                 refreshApps()
-                showInfo("Deleted $label and its app data.")
+                showInfo("Deleted $label and its app data. Its installed copy app icon is disabled; remove the Clony Copy app from Android if it remains.")
             } catch (error: Throwable) {
                 Log.e(TRACE_TAG, "clone_delete stage=failed package=${tile.packageName} userId=$userId label=$label", error)
                 showError(error.message?.takeIf(String::isNotBlank) ?: "Couldn't delete $label.", null)
                 refreshApps()
+            }
+        }
+    }
+
+    private fun saveFingerprint(tile: AppTile, fingerprint: String?) {
+        val userId = tile.virtualUserId ?: return
+        val value = fingerprint?.trim()?.takeIf(String::isNotEmpty)
+        if (value != null && !CloneFingerprintStore.isValid(value)) {
+            showError("Use printable characters with no spaces; fingerprints can be up to ${CloneFingerprintStore.MAX_LENGTH} characters.", null)
+            return
+        }
+
+        showProgress(tile.packageName, "Saving the device fingerprint for ${tile.displayName}…")
+        lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    if (!CloneFingerprintStore.write(this@MainActivity, tile.packageName, userId, value)) {
+                        error("Couldn't save the fingerprint setting.")
+                    }
+                    BlackBoxCore.get().stopPackage(tile.packageName, userId)
+                }
+                showInfo(
+                    if (value == null) "${tile.displayName} will use Clony's default device fingerprint the next time it starts."
+                    else "Saved the device fingerprint for ${tile.displayName}. It will be used the next time the copy starts."
+                )
+            } catch (error: Throwable) {
+                Log.e(TRACE_TAG, "fingerprint_save failed package=${tile.packageName} userId=$userId", error)
+                showError(error.message?.takeIf(String::isNotBlank) ?: "Couldn't save the device fingerprint.", null)
             }
         }
     }
@@ -502,7 +647,7 @@ class MainActivity : ComponentActivity() {
         )
         lifecycleScope.launch {
             try {
-                withContext(Dispatchers.IO) {
+                val createdUserIds = withContext(Dispatchers.IO) {
                     val runtime = BlackBoxCore.get()
                     val users = runtime.getUsers().orEmpty()
                     val existingCopyCount = users.count { runtime.isInstalled(tile.packageName, it.id) }
@@ -516,6 +661,12 @@ class MainActivity : ComponentActivity() {
                             val user = runtime.createUser(nextId++)
                                 ?: error("The virtual runtime couldn't create copy ${index + 1}.")
                             createdUserIds += user.id
+                            if (VirtualDeviceIdentity.createAndroidId(
+                                    this@MainActivity, tile.packageName, user.id
+                                ) == null
+                            ) {
+                                error("Couldn't create a private Android ID for copy ${index + 1}.")
+                            }
                             val result = runtime.installInstalledPackageAsUser(tile.packageName, user.id)
                             if (result == null) {
                                 error("The virtual package service stopped while creating copy ${index + 1}.")
@@ -534,15 +685,22 @@ class MainActivity : ComponentActivity() {
                                     tile.packageName + " userId=" + user.id + " reason=" + googleServices.msg)
                             }
                         }
+                        createdUserIds.toList()
                     } catch (error: Throwable) {
                         createdUserIds.asReversed().forEach { createdUserId ->
+                            runCatching {
+                                VirtualDeviceIdentity.deleteAndroidId(
+                                    this@MainActivity, tile.packageName, createdUserId
+                                )
+                            }
                             runCatching { runtime.deleteUser(createdUserId) }
                         }
                         throw error
                     }
                 }
                 refreshApps()
-                showInfo("Created $copiesToCreate ${tile.label} ${if (copiesToCreate == 1) "copy" else "copies"} with separate data. Tap a copy to open it.")
+                showInfo("Created $copiesToCreate ${tile.label} ${if (copiesToCreate == 1) "copy" else "copies"}. Installing a separate app icon for each copy…")
+                installCreatedLaunchers(tile.packageName, createdUserIds)
             } catch (error: Throwable) {
                 val detail = error.message?.takeIf(String::isNotBlank)
                 showError(
@@ -612,12 +770,16 @@ private fun ClonyHome(
     onOpenClone: (AppTile) -> Unit,
     onCreateCopies: (AppTile, Int) -> Unit,
     onPinClone: (AppTile) -> Unit,
+    onInstallLauncher: (AppTile) -> Unit,
+    onFingerprintSettings: (AppTile, String?) -> Unit,
     onDeleteClone: (AppTile) -> Unit
 ) {
     var isPickerOpen by remember { mutableStateOf(false) }
     var pickerQuery by remember { mutableStateOf("") }
     var copySelectionApp by remember { mutableStateOf<AppTile?>(null) }
     var deleteSelectionApp by remember { mutableStateOf<AppTile?>(null) }
+    var networkSelectionApp by remember { mutableStateOf<AppTile?>(null) }
+    var fingerprintSelectionApp by remember { mutableStateOf<AppTile?>(null) }
     var requestedCopyCount by remember { mutableStateOf(1) }
     val clonedApps = remember(apps) {
         apps.filter { it.isCloned }
@@ -778,7 +940,10 @@ private fun ClonyHome(
                                 modifier = Modifier.weight(1f),
                                 onClick = { onOpenClone(app) },
                                 onPin = { onPinClone(app) },
-                                onDelete = { deleteSelectionApp = app }
+                                onInstallLauncher = { onInstallLauncher(app) },
+                                onFingerprintSettings = { fingerprintSelectionApp = app },
+                                onDelete = { deleteSelectionApp = app },
+                                onNetworkSettings = { networkSelectionApp = app }
                             )
                         }
                         if (row.size == 1) Spacer(Modifier.weight(1f))
@@ -799,7 +964,7 @@ private fun ClonyHome(
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("Create another copy", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                     Text(
-                        "Each copy has separate app data. You can create up to $MAX_COPIES_PER_APP copies of an app.",
+                        "Each copy gets separate app data and its own Clony Copy app icon. You can create up to $MAX_COPIES_PER_APP copies.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -886,7 +1051,7 @@ private fun ClonyHome(
             onDismissRequest = { deleteSelectionApp = null },
             title = { Text("Delete ${app.label} Copy ${app.copyNumber ?: 1}?") },
             text = {
-                Text("This permanently removes the clone and its app data. Clony will disable its home screen shortcut; your launcher may require you to remove the pinned icon.")
+                Text("This permanently removes the copy and its app data. Clony disables its app-drawer launcher and home screen shortcut; you may need to remove those icons from Android manually.")
             },
             confirmButton = {
                 TextButton(
@@ -903,6 +1068,34 @@ private fun ClonyHome(
             }
         )
     }
+
+    networkSelectionApp?.let { app ->
+        CloneProxyDialog(
+            app = app,
+            onDismiss = { networkSelectionApp = null },
+            onSaved = {
+                networkSelectionApp = null
+                onRefresh()
+            }
+        )
+    }
+
+    fingerprintSelectionApp?.let { app ->
+        val userId = app.virtualUserId
+        val context = androidx.compose.ui.platform.LocalContext.current
+        val currentFingerprint = remember(app.packageName, userId) {
+            userId?.let { CloneFingerprintStore.read(context, app.packageName, it) }
+        }
+        CloneFingerprintDialog(
+            app = app,
+            currentFingerprint = currentFingerprint,
+            onDismiss = { fingerprintSelectionApp = null },
+            onSave = { fingerprint ->
+                fingerprintSelectionApp = null
+                onFingerprintSettings(app, fingerprint)
+            }
+        )
+    }
 }
 
 @Composable
@@ -913,7 +1106,10 @@ private fun AppGridTile(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onPin: () -> Unit,
-    onDelete: () -> Unit
+    onInstallLauncher: () -> Unit,
+    onFingerprintSettings: () -> Unit,
+    onDelete: () -> Unit,
+    onNetworkSettings: () -> Unit
 ) {
     var actionsExpanded by remember(app.packageName, app.virtualUserId) { mutableStateOf(false) }
     Card(
@@ -937,6 +1133,32 @@ private fun AppGridTile(
                 expanded = actionsExpanded,
                 onDismissRequest = { actionsExpanded = false }
             ) {
+                DropdownMenuItem(
+                    text = { Text("Proxy / network") },
+                    onClick = {
+                        actionsExpanded = false
+                        onNetworkSettings()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Device fingerprint") },
+                    onClick = {
+                        actionsExpanded = false
+                        onFingerprintSettings()
+                    }
+                )
+                if (app.launcherPackage != null) {
+                    DropdownMenuItem(
+                        text = {
+                            Text(if (app.launcherInstalled) "Copy app icon installed" else "Install launcher")
+                        },
+                        enabled = !app.launcherInstalled,
+                        onClick = {
+                            actionsExpanded = false
+                            onInstallLauncher()
+                        }
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text("Add copy icon to Home screen") },
                     onClick = {

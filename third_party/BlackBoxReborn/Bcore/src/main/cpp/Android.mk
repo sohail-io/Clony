@@ -42,6 +42,8 @@ Hook/VMClassLoaderHook.cpp \
 Hook/UnixFileSystemHook.cpp \
 Hook/BinderHook.cpp \
 Hook/BaseHook.cpp \
+Hook/ProxyTunnel.cpp \
+Hook/CloneProxyHook.cpp \
 JniHook/JniHook.cpp
 
 LOCAL_C_INCLUDES += $(LOCAL_PATH)

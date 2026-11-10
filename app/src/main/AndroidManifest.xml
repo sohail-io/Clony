@@ -4,6 +4,7 @@
 
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <uses-permission android:name="android.permission.REORDER_TASKS" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Virtual apps use Clony's Linux UID for hardware and shared media access. -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -46,6 +47,22 @@
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.Clony.CloneShortcut" />
+
+        <activity
+            android:name=".AutomationLaunchActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.launcherfiles"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/launcher_file_paths" />
+        </provider>
 
         <activity
             android:name="top.niunaijun.blackbox.app.VirtualAccountChooserActivity"
