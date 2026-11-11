@@ -16,6 +16,8 @@ static const char DEFAULT_BUILD_FINGERPRINT[] =
 static char build_fingerprint[PROP_VALUE_MAX] =
         "google/oriole/oriole:12/SP1A.210812.015/7679548:user/release-keys";
 static pthread_mutex_t build_fingerprint_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char device_model[PROP_VALUE_MAX] = "Pixel 6";
+static pthread_mutex_t device_model_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 struct SpoofedProp {
     const char* key;
@@ -60,9 +62,23 @@ static size_t copy_build_fingerprint(char *value) {
     return length;
 }
 
+static size_t copy_device_model(char *value) {
+    pthread_mutex_lock(&device_model_mutex);
+    size_t length = strnlen(device_model, PROP_VALUE_MAX - 1);
+    memcpy(value, device_model, length);
+    value[length] = '\0';
+    pthread_mutex_unlock(&device_model_mutex);
+    return length;
+}
+
 int my_system_property_get(const char *name, char *value) {
     if (strcmp(name, "ro.build.fingerprint") == 0) {
         size_t length = copy_build_fingerprint(value);
+        LOGD("[spoof] %s overridden", name);
+        return static_cast<int>(length);
+    }
+    if (strcmp(name, "ro.product.model") == 0) {
+        size_t length = copy_device_model(value);
         LOGD("[spoof] %s overridden", name);
         return static_cast<int>(length);
     }
@@ -88,6 +104,10 @@ int my_system_property_read(const prop_info *info, char *name, char *value) {
             && strcmp(name, "ro.build.fingerprint") == 0) {
         length = static_cast<int>(copy_build_fingerprint(value));
         LOGD("[spoof] %s overridden", name);
+    } else if (length >= 0 && name != nullptr && value != nullptr
+            && strcmp(name, "ro.product.model") == 0) {
+        length = static_cast<int>(copy_device_model(value));
+        LOGD("[spoof] %s overridden", name);
     }
     return length;
 }
@@ -105,6 +125,12 @@ static void property_read_callback_thunk(
         char fingerprint[PROP_VALUE_MAX];
         copy_build_fingerprint(fingerprint);
         context->callback(context->cookie, name, fingerprint, serial);
+        return;
+    }
+    if (name != nullptr && strcmp(name, "ro.product.model") == 0) {
+        char model[PROP_VALUE_MAX];
+        copy_device_model(model);
+        context->callback(context->cookie, name, model, serial);
         return;
     }
     context->callback(context->cookie, name, value, serial);
@@ -178,6 +204,62 @@ Java_top_niunaijun_blackbox_core_NativeCore_setBuildFingerprint(
         LOGD("Build.FINGERPRINT override applied length=%zu", length);
     } else {
         LOGD("Build.FINGERPRINT field update failed");
+    }
+    return success ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_top_niunaijun_blackbox_core_NativeCore_setDeviceModel(
+        JNIEnv *env, jclass, jstring model) {
+    const char *requested = model == nullptr ? nullptr : env->GetStringUTFChars(model, nullptr);
+    if (model != nullptr && requested == nullptr) return JNI_FALSE;
+
+    size_t length = requested == nullptr ? 0 : strlen(requested);
+    if (length == 0 || length >= PROP_VALUE_MAX) {
+        if (requested != nullptr) env->ReleaseStringUTFChars(model, requested);
+        return JNI_FALSE;
+    }
+    for (size_t i = 0; i < length; i++) {
+        if (requested[i] < 0x20 || requested[i] > 0x7e) {
+            if (requested != nullptr) env->ReleaseStringUTFChars(model, requested);
+            return JNI_FALSE;
+        }
+    }
+
+    pthread_mutex_lock(&device_model_mutex);
+    memcpy(device_model, requested, length);
+    device_model[length] = '\0';
+    pthread_mutex_unlock(&device_model_mutex);
+    env->ReleaseStringUTFChars(model, requested);
+
+    jclass buildClass = env->FindClass("android/os/Build");
+    if (buildClass == nullptr || env->ExceptionCheck()) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return JNI_FALSE;
+    }
+    jfieldID modelField = env->GetStaticFieldID(buildClass, "MODEL", "Ljava/lang/String;");
+    if (modelField == nullptr || env->ExceptionCheck()) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(buildClass);
+        return JNI_FALSE;
+    }
+    pthread_mutex_lock(&device_model_mutex);
+    jstring activeValue = env->NewStringUTF(device_model);
+    pthread_mutex_unlock(&device_model_mutex);
+    if (activeValue == nullptr || env->ExceptionCheck()) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(buildClass);
+        return JNI_FALSE;
+    }
+    env->SetStaticObjectField(buildClass, modelField, activeValue);
+    bool success = !env->ExceptionCheck();
+    if (!success) env->ExceptionClear();
+    env->DeleteLocalRef(activeValue);
+    env->DeleteLocalRef(buildClass);
+    if (success) {
+        LOGD("Build.MODEL override applied length=%zu", length);
+    } else {
+        LOGD("Build.MODEL field update failed");
     }
     return success ? JNI_TRUE : JNI_FALSE;
 }

@@ -79,6 +79,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.niunaijun.blackbox.BlackBoxCore
+import top.niunaijun.blackbox.core.CloneDeviceModelStore
 import top.niunaijun.blackbox.core.CloneFingerprintStore
 import top.niunaijun.blackbox.fake.service.VirtualDeviceIdentity
 import java.util.Locale
@@ -198,6 +199,7 @@ class MainActivity : ComponentActivity() {
                     onPinClone = ::pinCloneShortcut,
                     onInstallLauncher = ::installLauncher,
                     onFingerprintSettings = ::saveFingerprint,
+                    onDeviceModelSettings = ::saveDeviceModel,
                     onDeleteClone = ::deleteClone
                 )
             }
@@ -580,8 +582,16 @@ class MainActivity : ComponentActivity() {
                     }.onFailure {
                         Log.w(TRACE_TAG, "clone_delete stage=fingerprint_cleanup_failed package=${tile.packageName} userId=$userId", it)
                     }
+                    runCatching {
+                        CloneDeviceModelStore.write(this@MainActivity, tile.packageName, userId, null)
+                    }.onFailure {
+                        Log.w(TRACE_TAG, "clone_delete stage=device_model_cleanup_failed package=${tile.packageName} userId=$userId", it)
+                    }
                     if (!VirtualDeviceIdentity.deleteAndroidId(this@MainActivity, tile.packageName, userId)) {
                         Log.w(TRACE_TAG, "clone_delete stage=android_id_cleanup_failed package=${tile.packageName} userId=$userId")
+                    }
+                    if (!VirtualDeviceIdentity.deleteTelephonyIds(this@MainActivity, tile.packageName, userId)) {
+                        Log.w(TRACE_TAG, "clone_delete stage=telephony_id_cleanup_failed package=${tile.packageName} userId=$userId")
                     }
                 }
                 Log.i(TRACE_TAG, "clone_delete stage=shortcut_cleanup_begin package=${tile.packageName} userId=$userId")
@@ -622,6 +632,34 @@ class MainActivity : ComponentActivity() {
             } catch (error: Throwable) {
                 Log.e(TRACE_TAG, "fingerprint_save failed package=${tile.packageName} userId=$userId", error)
                 showError(error.message?.takeIf(String::isNotBlank) ?: "Couldn't save the device fingerprint.", null)
+            }
+        }
+    }
+
+    private fun saveDeviceModel(tile: AppTile, model: String?) {
+        val userId = tile.virtualUserId ?: return
+        val value = model?.trim()?.takeIf(String::isNotEmpty)
+        if (value != null && !CloneDeviceModelStore.isValid(value)) {
+            showError("Use printable characters with no more than ${CloneDeviceModelStore.MAX_LENGTH} characters.", null)
+            return
+        }
+
+        showProgress(tile.packageName, "Saving the phone model for ${tile.displayName}…")
+        lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    if (!CloneDeviceModelStore.write(this@MainActivity, tile.packageName, userId, value)) {
+                        error("Couldn't save the phone model setting.")
+                    }
+                    BlackBoxCore.get().stopPackage(tile.packageName, userId)
+                }
+                showInfo(
+                    if (value == null) "${tile.displayName} will use its default phone model behavior the next time it starts."
+                    else "Saved the phone model for ${tile.displayName}. It will be used the next time the copy starts."
+                )
+            } catch (error: Throwable) {
+                Log.e(TRACE_TAG, "device_model_save failed package=${tile.packageName} userId=$userId", error)
+                showError(error.message?.takeIf(String::isNotBlank) ?: "Couldn't save the phone model setting.", null)
             }
         }
     }
@@ -667,6 +705,12 @@ class MainActivity : ComponentActivity() {
                             ) {
                                 error("Couldn't create a private Android ID for copy ${index + 1}.")
                             }
+                            if (!VirtualDeviceIdentity.initializeTelephonyIds(
+                                    this@MainActivity, tile.packageName, user.id
+                                )
+                            ) {
+                                error("Couldn't prepare private telephony IDs for copy ${index + 1}.")
+                            }
                             val result = runtime.installInstalledPackageAsUser(tile.packageName, user.id)
                             if (result == null) {
                                 error("The virtual package service stopped while creating copy ${index + 1}.")
@@ -690,6 +734,11 @@ class MainActivity : ComponentActivity() {
                         createdUserIds.asReversed().forEach { createdUserId ->
                             runCatching {
                                 VirtualDeviceIdentity.deleteAndroidId(
+                                    this@MainActivity, tile.packageName, createdUserId
+                                )
+                            }
+                            runCatching {
+                                VirtualDeviceIdentity.deleteTelephonyIds(
                                     this@MainActivity, tile.packageName, createdUserId
                                 )
                             }
@@ -772,6 +821,7 @@ private fun ClonyHome(
     onPinClone: (AppTile) -> Unit,
     onInstallLauncher: (AppTile) -> Unit,
     onFingerprintSettings: (AppTile, String?) -> Unit,
+    onDeviceModelSettings: (AppTile, String?) -> Unit,
     onDeleteClone: (AppTile) -> Unit
 ) {
     var isPickerOpen by remember { mutableStateOf(false) }
@@ -780,6 +830,7 @@ private fun ClonyHome(
     var deleteSelectionApp by remember { mutableStateOf<AppTile?>(null) }
     var networkSelectionApp by remember { mutableStateOf<AppTile?>(null) }
     var fingerprintSelectionApp by remember { mutableStateOf<AppTile?>(null) }
+    var deviceModelSelectionApp by remember { mutableStateOf<AppTile?>(null) }
     var requestedCopyCount by remember { mutableStateOf(1) }
     val clonedApps = remember(apps) {
         apps.filter { it.isCloned }
@@ -942,6 +993,7 @@ private fun ClonyHome(
                                 onPin = { onPinClone(app) },
                                 onInstallLauncher = { onInstallLauncher(app) },
                                 onFingerprintSettings = { fingerprintSelectionApp = app },
+                                onDeviceModelSettings = { deviceModelSelectionApp = app },
                                 onDelete = { deleteSelectionApp = app },
                                 onNetworkSettings = { networkSelectionApp = app }
                             )
@@ -1096,6 +1148,23 @@ private fun ClonyHome(
             }
         )
     }
+
+    deviceModelSelectionApp?.let { app ->
+        val userId = app.virtualUserId
+        val context = androidx.compose.ui.platform.LocalContext.current
+        val currentModel = remember(app.packageName, userId) {
+            userId?.let { CloneDeviceModelStore.read(context, app.packageName, it) }
+        }
+        CloneDeviceModelDialog(
+            app = app,
+            currentModel = currentModel,
+            onDismiss = { deviceModelSelectionApp = null },
+            onSave = { model ->
+                deviceModelSelectionApp = null
+                onDeviceModelSettings(app, model)
+            }
+        )
+    }
 }
 
 @Composable
@@ -1108,6 +1177,7 @@ private fun AppGridTile(
     onPin: () -> Unit,
     onInstallLauncher: () -> Unit,
     onFingerprintSettings: () -> Unit,
+    onDeviceModelSettings: () -> Unit,
     onDelete: () -> Unit,
     onNetworkSettings: () -> Unit
 ) {
@@ -1145,6 +1215,13 @@ private fun AppGridTile(
                     onClick = {
                         actionsExpanded = false
                         onFingerprintSettings()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Phone model") },
+                    onClick = {
+                        actionsExpanded = false
+                        onDeviceModelSettings()
                     }
                 )
                 if (app.launcherPackage != null) {

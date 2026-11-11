@@ -42,6 +42,9 @@ public class NativeCore {
     /** Applies the virtual copy's build fingerprint to Android's property and Build APIs. */
     public static native boolean setBuildFingerprint(String fingerprint);
 
+    /** Applies an explicitly configured virtual device model to Android's property and Build APIs. */
+    public static native boolean setDeviceModel(String model);
+
     /** Narrow service-cache access, plus read-only Activity FragmentController access. */
     public static native Object getFrameworkService(Object manager, String interfaceName);
     public static native boolean setFrameworkService(Object manager, String interfaceName, Object service);

@@ -141,6 +141,19 @@ public class IActivityManagerProxy extends ClassInvocationStub {
                         || auth.equals("com.google.android.gms.chimera")
                         || auth.equals("com.huawei.android.launcher.settings")
                         || auth.equals("com.hihonor.android.launcher.settings")) {
+                    if (auth.equals("media")) {
+                        int userIndex = getUserIndex();
+                        if (userIndex >= 0 && userIndex < args.length
+                                && args[userIndex] instanceof Integer) {
+                            int requestedUserId = (Integer) args[userIndex];
+                            int hostUserId = BlackBoxCore.getHostUserId();
+                            if (requestedUserId != hostUserId) {
+                                args[userIndex] = hostUserId;
+                                Slog.d(TAG, "Routing media provider from virtual user "
+                                        + requestedUserId + " to host user " + hostUserId);
+                            }
+                        }
+                    }
                     content = method.invoke(who, args);
                     ContentProviderDelegate.update(content, (String) auth);
                     return content;

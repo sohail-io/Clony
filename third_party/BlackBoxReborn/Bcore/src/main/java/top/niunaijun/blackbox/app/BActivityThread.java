@@ -67,6 +67,7 @@ import top.niunaijun.blackbox.core.IBActivityThread;
 import top.niunaijun.blackbox.core.IOCore;
 import top.niunaijun.blackbox.core.NativeCore;
 import top.niunaijun.blackbox.core.CloneFingerprintStore;
+import top.niunaijun.blackbox.core.CloneDeviceModelStore;
 import top.niunaijun.blackbox.core.env.VirtualRuntime;
 import top.niunaijun.blackbox.core.system.user.BUserHandle;
 import top.niunaijun.blackbox.entity.AppConfig;
@@ -418,6 +419,12 @@ public class BActivityThread extends IBActivityThread.Stub {
         boolean fingerprintApplied = NativeCore.setBuildFingerprint(buildFingerprint);
         if (!fingerprintApplied) {
             Slog.w(TAG, "Could not apply the virtual build fingerprint for " + packageName);
+        }
+        String deviceModel = CloneDeviceModelStore.read(
+                BlackBoxCore.getContext(), packageName, getUserId());
+        if (deviceModel != null && !deviceModel.isEmpty()
+                && !NativeCore.setDeviceModel(deviceModel)) {
+            Slog.w(TAG, "Could not apply the virtual device model for " + packageName);
         }
         assert packageContext != null;
         IOCore.get().enableRedirect(packageContext);

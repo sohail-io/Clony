@@ -34,13 +34,23 @@ public class StoragePermissionHelper {
     
     public static boolean hasStoragePermission(Context context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Clony currently targets API 28. Android keeps using the legacy
+            // storage permission for apps below API 33, even when newer media
+            // permissions are also declared and granted.
+            if (context.getApplicationInfo().targetSdkVersion < Build.VERSION_CODES.TIRAMISU) {
+                return ContextCompat.checkSelfPermission(context,
+                        Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+            }
             
             return ContextCompat.checkSelfPermission(context, 
                     Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED ||
                    ContextCompat.checkSelfPermission(context, 
                     Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED ||
                    ContextCompat.checkSelfPermission(context, 
-                    Manifest.permission.READ_MEDIA_AUDIO) == PackageManager.PERMISSION_GRANTED;
+                    Manifest.permission.READ_MEDIA_AUDIO) == PackageManager.PERMISSION_GRANTED ||
+                   (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+                    ContextCompat.checkSelfPermission(context,
+                    Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED);
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             
             return Environment.isExternalStorageManager() ||
@@ -95,12 +105,19 @@ public class StoragePermissionHelper {
     
     public static void requestStoragePermission(Activity activity) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            
+            if (activity.getApplicationInfo().targetSdkVersion < Build.VERSION_CODES.TIRAMISU) {
+                ActivityCompat.requestPermissions(activity,
+                        new String[]{Manifest.permission.READ_EXTERNAL_STORAGE},
+                        REQUEST_CODE_STORAGE_PERMISSION);
+                return;
+            }
+
             ActivityCompat.requestPermissions(activity,
                     new String[]{
                             Manifest.permission.READ_MEDIA_IMAGES,
                             Manifest.permission.READ_MEDIA_VIDEO,
-                            Manifest.permission.READ_MEDIA_AUDIO
+                            Manifest.permission.READ_MEDIA_AUDIO,
+                            Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
                     },
                     REQUEST_CODE_STORAGE_PERMISSION);
         } else {
@@ -129,7 +146,8 @@ public class StoragePermissionHelper {
     
     
     public static boolean shouldShowStorageRationale(Activity activity) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                activity.getApplicationInfo().targetSdkVersion >= Build.VERSION_CODES.TIRAMISU) {
             return ActivityCompat.shouldShowRequestPermissionRationale(activity, 
                     Manifest.permission.READ_MEDIA_IMAGES);
         } else {

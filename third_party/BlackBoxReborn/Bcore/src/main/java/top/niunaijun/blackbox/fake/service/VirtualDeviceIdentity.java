@@ -3,11 +3,13 @@ package top.niunaijun.blackbox.fake.service;
 import android.content.Context;
 import android.util.AtomicFile;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.RandomAccessFile;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
@@ -24,20 +26,25 @@ import top.niunaijun.blackbox.utils.Slog;
 
 /**
  * Provides stable, clone-scoped identifiers without exposing host hardware IDs.
- * Random Android IDs and the telephony derivation seed live in no-backup storage.
+ * Android IDs, new-clone telephony IDs, and the legacy derivation seed live in no-backup storage.
  */
 public final class VirtualDeviceIdentity {
     private static final String TAG = "VirtualDeviceIdentity";
     private static final String SEED_FILE_NAME = "virtual-device-identity.seed";
     private static final String LOCK_FILE_NAME = "virtual-device-identity.lock";
     private static final String ANDROID_ID_LOCK_FILE_NAME = "virtual-android-id.lock";
+    private static final String TELEPHONY_ID_LOCK_FILE_NAME = "virtual-telephony-id.lock";
     private static final String ANDROID_ID_FILE_PREFIX = "virtual-android-id-";
+    // v2 files are only written by clone creation; legacy clones keep their old HMAC IDs.
+    private static final String TELEPHONY_ID_FILE_PREFIX = "virtual-telephony-id-v2-";
+    private static final String PREVIOUS_TELEPHONY_ID_FILE_PREFIX = "virtual-telephony-id-";
     private static final String HMAC_ALGORITHM = "HmacSHA256";
     private static final int SEED_LENGTH_BYTES = 32;
     private static final int ANDROID_ID_LENGTH = 16;
 
     private static final Object SEED_LOCK = new Object();
     private static final Object ANDROID_ID_LOCK = new Object();
+    private static final Object TELEPHONY_ID_LOCK = new Object();
     private static volatile byte[] sSeed;
     private static final ConcurrentHashMap<String, String> sAndroidIds = new ConcurrentHashMap<>();
 
@@ -197,6 +204,12 @@ public final class VirtualDeviceIdentity {
             int userId,
             String identifierKind
     ) {
+        if ("imei".equals(identifierKind) || "device_id".equals(identifierKind)
+                || "imsi".equals(identifierKind)) {
+            TelephonyIds ids = readTelephonyIds(context, packageName, userId);
+            if (ids != null) return "imsi".equals(identifierKind) ? ids.imsi : ids.imei;
+        }
+
         byte[] digest = derive(context, packageName, userId, identifierKind);
         if (digest == null) return null;
 
@@ -209,6 +222,169 @@ public final class VirtualDeviceIdentity {
             return withLuhnCheckDigit(digits.substring(0, 14));
         }
         return digits;
+    }
+
+    /**
+     * Generates fresh telephony IDs for a new clone. Older clones without a v2 record
+     * continue using their original seed-derived IDs, so an app update does not rotate them.
+     */
+    public static boolean initializeTelephonyIds(Context context, String packageName, int userId) {
+        if (context == null || packageName == null || packageName.isEmpty() || userId < 0) {
+            return false;
+        }
+        synchronized (TELEPHONY_ID_LOCK) {
+            try {
+                File directory = context.getNoBackupFilesDir();
+                if (directory == null || (!directory.exists() && !directory.mkdirs())) {
+                    Slog.w(TAG, "Could not open private telephony ID storage");
+                    return false;
+                }
+                File lockPath = new File(directory, TELEPHONY_ID_LOCK_FILE_NAME);
+                File identityPath = telephonyIdFile(directory, packageName, userId,
+                        TELEPHONY_ID_FILE_PREFIX);
+                try (RandomAccessFile lockFile = new RandomAccessFile(lockPath, "rw")) {
+                    FileChannel channel = lockFile.getChannel();
+                    try (FileLock ignored = channel.lock()) {
+                        TelephonyIds generated = generateTelephonyIds();
+                        AtomicFile atomicFile = new AtomicFile(identityPath);
+                        FileOutputStream output = atomicFile.startWrite();
+                        try {
+                            String record = generated.imei + "\n" + generated.imsi + "\n";
+                            output.write(record.getBytes(StandardCharsets.US_ASCII));
+                            atomicFile.finishWrite(output);
+                        } catch (IOException error) {
+                            atomicFile.failWrite(output);
+                            throw error;
+                        }
+                        return true;
+                    }
+                }
+            } catch (IOException | SecurityException | GeneralSecurityException
+                    | java.nio.channels.OverlappingFileLockException error) {
+                Slog.w(TAG, "Could not initialize clone telephony IDs: "
+                        + error.getClass().getSimpleName());
+                return false;
+            }
+        }
+    }
+
+    /** Removes generated telephony IDs after the virtual user is deleted. */
+    public static boolean deleteTelephonyIds(Context context, String packageName, int userId) {
+        if (context == null || packageName == null || packageName.isEmpty() || userId < 0) {
+            return false;
+        }
+        synchronized (TELEPHONY_ID_LOCK) {
+            try {
+                File directory = context.getNoBackupFilesDir();
+                if (directory == null || !directory.exists()) return true;
+                File lockPath = new File(directory, TELEPHONY_ID_LOCK_FILE_NAME);
+                File currentPath = telephonyIdFile(directory, packageName, userId,
+                        TELEPHONY_ID_FILE_PREFIX);
+                File previousPath = telephonyIdFile(directory, packageName, userId,
+                        PREVIOUS_TELEPHONY_ID_FILE_PREFIX);
+                try (RandomAccessFile lockFile = new RandomAccessFile(lockPath, "rw")) {
+                    FileChannel channel = lockFile.getChannel();
+                    try (FileLock ignored = channel.lock()) {
+                        new AtomicFile(currentPath).delete();
+                        new AtomicFile(previousPath).delete();
+                    }
+                }
+                return true;
+            } catch (IOException | SecurityException | GeneralSecurityException
+                    | java.nio.channels.OverlappingFileLockException error) {
+                Slog.w(TAG, "Could not remove clone telephony IDs: "
+                        + error.getClass().getSimpleName());
+                return false;
+            }
+        }
+    }
+
+    private static TelephonyIds readTelephonyIds(Context context, String packageName, int userId) {
+        if (context == null || packageName == null || packageName.isEmpty() || userId < 0) {
+            return null;
+        }
+        synchronized (TELEPHONY_ID_LOCK) {
+            try {
+                File directory = context.getNoBackupFilesDir();
+                if (directory == null || !directory.exists()) return null;
+                File lockPath = new File(directory, TELEPHONY_ID_LOCK_FILE_NAME);
+                File identityPath = telephonyIdFile(directory, packageName, userId,
+                        TELEPHONY_ID_FILE_PREFIX);
+                try (RandomAccessFile lockFile = new RandomAccessFile(lockPath, "rw")) {
+                    FileChannel channel = lockFile.getChannel();
+                    try (FileLock ignored = channel.lock()) {
+                        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                                new AtomicFile(identityPath).openRead(), StandardCharsets.US_ASCII))) {
+                            String imei = reader.readLine();
+                            String imsi = reader.readLine();
+                            if (reader.readLine() != null || !isValidImei(imei)
+                                    || !isDigits(imsi, 15)) return null;
+                            return new TelephonyIds(imei, imsi);
+                        } catch (FileNotFoundException missing) {
+                            return null;
+                        }
+                    }
+                }
+            } catch (IOException | SecurityException | GeneralSecurityException
+                    | java.nio.channels.OverlappingFileLockException error) {
+                Slog.w(TAG, "Could not read clone telephony IDs: "
+                        + error.getClass().getSimpleName());
+                return null;
+            }
+        }
+    }
+
+    private static TelephonyIds generateTelephonyIds() {
+        SecureRandom random = new SecureRandom();
+        StringBuilder imeiBody = new StringBuilder(14);
+        imeiBody.append(3 + random.nextInt(7));
+        for (int i = 1; i < 14; i++) imeiBody.append(random.nextInt(10));
+        String imei = withLuhnCheckDigit(imeiBody.toString());
+
+        StringBuilder imsi = new StringBuilder(15);
+        imsi.append(1 + random.nextInt(8));
+        for (int i = 1; i < 15; i++) imsi.append(random.nextInt(10));
+        return new TelephonyIds(imei, imsi.toString());
+    }
+
+    private static boolean isValidImei(String imei) {
+        if (!isDigits(imei, 15)) return false;
+        int sum = 0;
+        for (int i = 0; i < 14; i++) {
+            int digit = imei.charAt(i) - '0';
+            if ((i & 1) == 1) {
+                digit *= 2;
+                if (digit > 9) digit -= 9;
+            }
+            sum += digit;
+        }
+        return (10 - (sum % 10)) % 10 == imei.charAt(14) - '0';
+    }
+
+    private static boolean isDigits(String value, int expectedLength) {
+        if (value == null || value.length() != expectedLength) return false;
+        for (int i = 0; i < value.length(); i++) {
+            if (value.charAt(i) < '0' || value.charAt(i) > '9') return false;
+        }
+        return true;
+    }
+
+    private static File telephonyIdFile(
+            File directory, String packageName, int userId, String prefix)
+            throws GeneralSecurityException {
+        byte[] key = (packageName + "\u0000" + userId).getBytes(StandardCharsets.UTF_8);
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(key);
+        return new File(directory, prefix + toHex(digest, digest.length));
+    }
+
+    private static final class TelephonyIds {
+        final String imei;
+        final String imsi;
+
+        TelephonyIds(String imei, String imsi) {
+            this.imei = imei;
+            this.imsi = imsi;
+        }
     }
 
     private static byte[] derive(Context context, String packageName, int userId, String kind) {

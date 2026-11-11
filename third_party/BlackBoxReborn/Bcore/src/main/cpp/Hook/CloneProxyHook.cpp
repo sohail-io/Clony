@@ -47,6 +47,23 @@ static int udpRelayError=0;
 static std::chrono::steady_clock::time_point udpRelayRetryAfter{};
 
 static bool internetAddress(const sockaddr* address){return address&&(address->sa_family==AF_INET||address->sa_family==AF_INET6);}
+static bool resolveProxyIPv4(const std::string& host,in_addr* address){
+ if(address==nullptr||host.empty()){errno=EINVAL;return false;}
+ if(inet_pton(AF_INET,host.c_str(),address)==1)return true;
+ addrinfo hints{};hints.ai_family=AF_INET;hints.ai_socktype=SOCK_STREAM;
+ addrinfo* resolved=nullptr;
+ int result=getaddrinfo(host.c_str(),nullptr,&hints,&resolved);
+ if(result!=0||resolved==nullptr){if(resolved)freeaddrinfo(resolved);errno=EHOSTUNREACH;return false;}
+ bool found=false;
+ for(addrinfo* current=resolved;current!=nullptr;current=current->ai_next){
+  if(current->ai_family==AF_INET&&current->ai_addrlen>=sizeof(sockaddr_in)){
+   *address=((sockaddr_in*)current->ai_addr)->sin_addr;found=true;break;
+  }
+ }
+ freeaddrinfo(resolved);
+ if(!found)errno=EHOSTUNREACH;
+ return found;
+}
 static bool loopbackAddress(const sockaddr* address){
  if(!address)return false;
  if(address->sa_family==AF_INET)return (ntohl(((const sockaddr_in*)address)->sin_addr.s_addr)>>24)==127;
@@ -412,7 +429,10 @@ Java_top_niunaijun_blackbox_core_NativeCore_configureProxy(JNIEnv* env,jclass,ji
  settings.user.resize(env->GetArrayLength(user));settings.password.resize(env->GetArrayLength(password));
  if(!settings.user.empty())env->GetByteArrayRegion(user,0,settings.user.size(),(jbyte*)&settings.user[0]);
  if(!settings.password.empty())env->GetByteArrayRegion(password,0,settings.password.size(),(jbyte*)&settings.password[0]);
- in_addr ip{};if(port<1||port>65535||inet_pton(AF_INET,settings.host.c_str(),&ip)!=1||settings.user.size()>255||settings.password.size()>255)return JNI_FALSE;
+ in_addr ip{};if(port<1||port>65535||!resolveProxyIPv4(settings.host,&ip)||settings.user.size()>255||settings.password.size()>255)return JNI_FALSE;
+ char numericHost[INET_ADDRSTRLEN];
+ if(inet_ntop(AF_INET,&ip,numericHost,sizeof(numericHost))==nullptr)return JNI_FALSE;
+ settings.host=numericHost;
  void* connectAddress=dlsym(RTLD_DEFAULT,"connect");
  if(!connectAddress)return JNI_FALSE;
  if(DobbyHook(connectAddress,(void*)proxyConnect,(void**)&realConnect)!=0)return JNI_FALSE;
@@ -450,7 +470,10 @@ Java_top_niunaijun_blackbox_core_NativeCore_probeProxy(JNIEnv* env,jclass,jint t
  if(!c.password.empty())env->GetByteArrayRegion(password,0,c.password.size(),(jbyte*)&c.password[0]);
  if((type!=1&&type!=2)||port<1||port>65535)return EINVAL;
  sockaddr_in endpoint{};endpoint.sin_family=AF_INET;endpoint.sin_port=htons(port);
- if(inet_pton(AF_INET,c.host.c_str(),&endpoint.sin_addr)!=1)return EINVAL;
+ if(!resolveProxyIPv4(c.host,&endpoint.sin_addr))return proxyProbeFailure(1,errno);
+ char numericHost[INET_ADDRSTRLEN];
+ if(inet_ntop(AF_INET,&endpoint.sin_addr,numericHost,sizeof(numericHost))==nullptr)return proxyProbeFailure(1,errno);
+ c.host=numericHost;
  int fd=socket(AF_INET,SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0);if(fd<0)return proxyProbeFailure(1,errno);
  int result=connect(fd,(sockaddr*)&endpoint,sizeof(endpoint));bool ok=result==0;
  if(result<0&&errno==EINPROGRESS){

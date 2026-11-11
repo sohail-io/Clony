@@ -124,8 +124,8 @@ internal fun CloneProxyDialog(app: AppTile, onDismiss: () -> Unit, onSaved: () -
                         value = input,
                         onValueChange = { input = it; message = null },
                         enabled = !busy && loaded,
-                        label = { Text("IP:port:user:pass") },
-                        supportingText = { Text("IPv4. Use IP:port if no authentication is needed.") },
+                        label = { Text("Host:port:user:pass") },
+                        supportingText = { Text("IPv4 or hostname. Use host:port if no authentication is needed.") },
                         visualTransformation = PasswordVisualTransformation(),
                         singleLine = true
                     )

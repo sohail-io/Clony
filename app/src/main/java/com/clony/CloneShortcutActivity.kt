@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
@@ -48,9 +49,66 @@ class CloneShortcutActivity : ComponentActivity() {
                 traceShortcut("validation_result valid=" + isValidClone, packageName, userId)
                 if (!isValidClone) {
                     toast("This copy is no longer available.")
+                    finishShortcutActivity()
                     return@launch
                 }
 
+                val requestsMedia = withContext(Dispatchers.IO) {
+                    val requestedPermissions = BlackBoxCore.getBPackageManager()
+                        .getPackageInfo(packageName, PackageManager.GET_PERMISSIONS, userId)
+                        ?.requestedPermissions.orEmpty()
+                    requestedPermissions.any { permission ->
+                        permission == android.Manifest.permission.READ_EXTERNAL_STORAGE ||
+                            permission == android.Manifest.permission.READ_MEDIA_IMAGES ||
+                            permission == android.Manifest.permission.READ_MEDIA_VIDEO ||
+                            permission == android.Manifest.permission.READ_MEDIA_AUDIO ||
+                            permission == "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+                    }
+                }
+                if (requestsMedia && !BlackBoxCore.get().hasStoragePermission()) {
+                    traceShortcut("storage_permission_request", packageName, userId)
+                    BlackBoxCore.get().requestStoragePermission(this@CloneShortcutActivity)
+                    return@launch
+                }
+
+                startCloneLaunch(packageName, userId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                Log.e(SHORTCUT_TRACE_TAG, "shortcut stage=permission_preflight_failed package=" +
+                    packageName + " userId=" + userId, error)
+                toast(error.message?.takeIf(String::isNotBlank) ?: "Clony couldn't open this copy.")
+                finishShortcutActivity()
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != BlackBoxCore.getStoragePermissionRequestCode()) return
+
+        val packageName = intent.getStringExtra(EXTRA_CLONE_PACKAGE)
+        val userId = intent.getIntExtra(EXTRA_CLONE_USER_ID, -1)
+        val granted = BlackBoxCore.get().hasStoragePermission()
+        traceShortcut("storage_permission_result granted=" + granted, packageName, userId)
+        if (!granted) {
+            toast("Media access is off; uploads may not show your photos or videos.")
+        }
+        if (!packageName.isNullOrBlank() && userId >= 1) {
+            startCloneLaunch(packageName, userId)
+        } else {
+            finishShortcutActivity()
+        }
+    }
+
+    private fun startCloneLaunch(packageName: String, userId: Int) {
+        lifecycleScope.launch {
+            try {
                 // Existing clones should resume immediately. Starting the app's
                 // launch activity first would briefly flash its splash before
                 // the existing task comes forward.
