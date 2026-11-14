@@ -1,5 +1,10 @@
 #include <sys/system_properties.h>
 #include <cstring>
+#include <cstdlib>
+#include <limits>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 #include <pthread.h>
 #include "./xdl.h"
 #include <android/log.h>
@@ -18,6 +23,8 @@ static char build_fingerprint[PROP_VALUE_MAX] =
 static pthread_mutex_t build_fingerprint_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char device_model[PROP_VALUE_MAX] = "Pixel 6";
 static pthread_mutex_t device_model_mutex = PTHREAD_MUTEX_INITIALIZER;
+static std::unordered_map<std::string, std::string> custom_build_props;
+static std::mutex custom_build_props_mutex;
 
 struct SpoofedProp {
     const char* key;
@@ -71,7 +78,109 @@ static size_t copy_device_model(char *value) {
     return length;
 }
 
+static bool copy_custom_build_prop(const char *name, char *value) {
+    if (name == nullptr || value == nullptr) return false;
+    std::lock_guard<std::mutex> lock(custom_build_props_mutex);
+    auto entry = custom_build_props.find(name);
+    if (entry == custom_build_props.end()) return false;
+    size_t length = entry->second.size();
+    memcpy(value, entry->second.c_str(), length);
+    value[length] = '\0';
+    return true;
+}
+
+static const char *system_property_for_build_prop(const char *name) {
+    if (strcmp(name, "deviceName") == 0) return "ro.product.marketname";
+    if (strcmp(name, "manufacturer") == 0) return "ro.product.manufacturer";
+    if (strcmp(name, "brand") == 0) return "ro.product.brand";
+    if (strcmp(name, "model") == 0) return "ro.product.model";
+    if (strcmp(name, "product") == 0) return "ro.product.name";
+    if (strcmp(name, "device") == 0) return "ro.product.device";
+    if (strcmp(name, "board") == 0) return "ro.product.board";
+    if (strcmp(name, "radio") == 0) return "gsm.version.baseband";
+    if (strcmp(name, "bootloader") == 0) return "ro.bootloader";
+    if (strcmp(name, "fingerprint") == 0) return "ro.build.fingerprint";
+    if (strcmp(name, "build") == 0) return "ro.build.id";
+    if (strcmp(name, "host") == 0) return "ro.build.host";
+    if (strcmp(name, "time") == 0) return "ro.build.date.utc";
+    if (strcmp(name, "release") == 0) return "ro.build.version.release";
+    if (strcmp(name, "sdkInt") == 0) return "ro.build.version.sdk";
+    return nullptr;
+}
+
+static const char *build_field_for_build_prop(const char *name) {
+    if (strcmp(name, "manufacturer") == 0) return "MANUFACTURER";
+    if (strcmp(name, "brand") == 0) return "BRAND";
+    if (strcmp(name, "model") == 0 || strcmp(name, "deviceName") == 0) return "MODEL";
+    if (strcmp(name, "product") == 0) return "PRODUCT";
+    if (strcmp(name, "device") == 0) return "DEVICE";
+    if (strcmp(name, "board") == 0) return "BOARD";
+    if (strcmp(name, "bootloader") == 0) return "BOOTLOADER";
+    if (strcmp(name, "fingerprint") == 0) return "FINGERPRINT";
+    if (strcmp(name, "build") == 0) return "ID";
+    if (strcmp(name, "host") == 0) return "HOST";
+    return nullptr;
+}
+
+static bool set_build_string_field(JNIEnv *env, jclass buildClass,
+                                   const char *fieldName, const char *value) {
+    if (fieldName == nullptr || value == nullptr) return true;
+    jfieldID field = env->GetStaticFieldID(buildClass, fieldName, "Ljava/lang/String;");
+    if (field == nullptr || env->ExceptionCheck()) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    jstring stringValue = env->NewStringUTF(value);
+    if (stringValue == nullptr || env->ExceptionCheck()) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    env->SetStaticObjectField(buildClass, field, stringValue);
+    bool success = !env->ExceptionCheck();
+    if (!success) env->ExceptionClear();
+    env->DeleteLocalRef(stringValue);
+    return success;
+}
+
+static bool set_version_string_field(JNIEnv *env, jclass versionClass,
+                                     const char *fieldName, const char *value) {
+    if (fieldName == nullptr || value == nullptr) return true;
+    jfieldID field = env->GetStaticFieldID(versionClass, fieldName, "Ljava/lang/String;");
+    if (field == nullptr || env->ExceptionCheck()) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    jstring stringValue = env->NewStringUTF(value);
+    if (stringValue == nullptr || env->ExceptionCheck()) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    env->SetStaticObjectField(versionClass, field, stringValue);
+    bool success = !env->ExceptionCheck();
+    if (!success) env->ExceptionClear();
+    env->DeleteLocalRef(stringValue);
+    return success;
+}
+
+static bool set_version_int_field(JNIEnv *env, jclass versionClass,
+                                  const char *fieldName, jint value) {
+    if (fieldName == nullptr) return true;
+    jfieldID field = env->GetStaticFieldID(versionClass, fieldName, "I");
+    if (field == nullptr || env->ExceptionCheck()) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    env->SetStaticIntField(versionClass, field, value);
+    bool success = !env->ExceptionCheck();
+    if (!success) env->ExceptionClear();
+    return success;
+}
+
 int my_system_property_get(const char *name, char *value) {
+    if (copy_custom_build_prop(name, value)) {
+        LOGD("[build props] %s overridden", name);
+        return static_cast<int>(strlen(value));
+    }
     if (strcmp(name, "ro.build.fingerprint") == 0) {
         size_t length = copy_build_fingerprint(value);
         LOGD("[spoof] %s overridden", name);
@@ -101,6 +210,10 @@ int my_system_property_read(const prop_info *info, char *name, char *value) {
     if (orig_system_property_read == nullptr) return 0;
     int length = orig_system_property_read(info, name, value);
     if (length >= 0 && name != nullptr && value != nullptr
+            && copy_custom_build_prop(name, value)) {
+        length = static_cast<int>(strlen(value));
+        LOGD("[build props] %s overridden", name);
+    } else if (length >= 0 && name != nullptr && value != nullptr
             && strcmp(name, "ro.build.fingerprint") == 0) {
         length = static_cast<int>(copy_build_fingerprint(value));
         LOGD("[spoof] %s overridden", name);
@@ -121,6 +234,11 @@ static void property_read_callback_thunk(
         void *cookie, const char *name, const char *value, uint32_t serial) {
     PropertyReadCallbackContext *context =
             static_cast<PropertyReadCallbackContext *>(cookie);
+    char customValue[PROP_VALUE_MAX];
+    if (copy_custom_build_prop(name, customValue)) {
+        context->callback(context->cookie, name, customValue, serial);
+        return;
+    }
     if (name != nullptr && strcmp(name, "ro.build.fingerprint") == 0) {
         char fingerprint[PROP_VALUE_MAX];
         copy_build_fingerprint(fingerprint);
@@ -262,6 +380,164 @@ Java_top_niunaijun_blackbox_core_NativeCore_setDeviceModel(
         LOGD("Build.MODEL field update failed");
     }
     return success ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_top_niunaijun_blackbox_core_NativeCore_setBuildPropsNative(
+        JNIEnv *env, jclass, jobjectArray propertyNames, jobjectArray values) {
+    if (propertyNames == nullptr || values == nullptr) return JNI_FALSE;
+    jsize nameCount = env->GetArrayLength(propertyNames);
+    jsize valueCount = env->GetArrayLength(values);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return JNI_FALSE;
+    }
+    if (nameCount != valueCount || nameCount > 32) return JNI_FALSE;
+
+    std::unordered_map<std::string, std::string> requestedValues;
+    std::unordered_map<std::string, std::string> nextProperties;
+    for (jsize index = 0; index < nameCount; index++) {
+        jstring nameString = static_cast<jstring>(env->GetObjectArrayElement(propertyNames, index));
+        jstring valueString = static_cast<jstring>(env->GetObjectArrayElement(values, index));
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            if (nameString != nullptr) env->DeleteLocalRef(nameString);
+            if (valueString != nullptr) env->DeleteLocalRef(valueString);
+            return JNI_FALSE;
+        }
+        if (nameString == nullptr) {
+            if (valueString != nullptr) env->DeleteLocalRef(valueString);
+            return JNI_FALSE;
+        }
+
+        const char *nameChars = env->GetStringUTFChars(nameString, nullptr);
+        const char *valueChars = valueString == nullptr ? nullptr : env->GetStringUTFChars(valueString, nullptr);
+        if (nameChars == nullptr || (valueString != nullptr && valueChars == nullptr)) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            if (nameChars != nullptr) env->ReleaseStringUTFChars(nameString, nameChars);
+            if (valueChars != nullptr) env->ReleaseStringUTFChars(valueString, valueChars);
+            env->DeleteLocalRef(nameString);
+            if (valueString != nullptr) env->DeleteLocalRef(valueString);
+            return JNI_FALSE;
+        }
+
+        std::string name(nameChars);
+        std::string value(valueChars == nullptr ? "" : valueChars);
+        env->ReleaseStringUTFChars(nameString, nameChars);
+        if (valueChars != nullptr) env->ReleaseStringUTFChars(valueString, valueChars);
+        env->DeleteLocalRef(nameString);
+        if (valueString != nullptr) env->DeleteLocalRef(valueString);
+
+        bool knownName = system_property_for_build_prop(name.c_str()) != nullptr
+                || strcmp(name.c_str(), "osVersion") == 0;
+        if (!knownName || value.size() >= PROP_VALUE_MAX) return JNI_FALSE;
+        for (unsigned char character : value) {
+            if (character < 0x20 || character > 0x7e) return JNI_FALSE;
+        }
+        if (!value.empty()) requestedValues[name] = value;
+    }
+
+    jint sdkIntValue = 0;
+    auto sdkInt = requestedValues.find("sdkInt");
+    if (sdkInt != requestedValues.end()) {
+        char *end = nullptr;
+        long long parsedSdkInt = strtoll(sdkInt->second.c_str(), &end, 10);
+        if (end == sdkInt->second.c_str() || *end != '\0' || parsedSdkInt < 1
+                || parsedSdkInt > std::numeric_limits<jint>::max()) {
+            return JNI_FALSE;
+        }
+        sdkIntValue = static_cast<jint>(parsedSdkInt);
+    }
+
+    auto deviceName = requestedValues.find("deviceName");
+    auto model = requestedValues.find("model");
+    for (const auto &entry : requestedValues) {
+        if (entry.first == "osVersion") continue;
+        const char *propertyName = system_property_for_build_prop(entry.first.c_str());
+        if (propertyName == nullptr) continue;
+
+        if (entry.first == "deviceName") {
+            nextProperties[propertyName] = entry.second;
+            if (model == requestedValues.end()) {
+                nextProperties["ro.product.model"] = entry.second;
+            }
+        } else if (entry.first == "time") {
+            char *end = nullptr;
+            long long milliseconds = strtoll(entry.second.c_str(), &end, 10);
+            if (end == entry.second.c_str() || *end != '\0' || milliseconds < 0) {
+                return JNI_FALSE;
+            }
+            nextProperties[propertyName] = std::to_string(milliseconds / 1000);
+        } else {
+            nextProperties[propertyName] = entry.second;
+        }
+    }
+
+    jclass buildClass = env->FindClass("android/os/Build");
+    if (buildClass == nullptr || env->ExceptionCheck()) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return JNI_FALSE;
+    }
+    bool success = true;
+    for (const auto &entry : requestedValues) {
+        const char *fieldName = build_field_for_build_prop(entry.first.c_str());
+        if (fieldName != nullptr && entry.first != "deviceName") {
+            success = set_build_string_field(env, buildClass, fieldName, entry.second.c_str()) && success;
+        }
+    }
+    auto release = requestedValues.find("release");
+    if (release != requestedValues.end()) {
+        jclass versionClass = env->FindClass("android/os/Build$VERSION");
+        if (versionClass == nullptr || env->ExceptionCheck()) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            success = false;
+        } else {
+            success = set_version_string_field(env, versionClass, "RELEASE", release->second.c_str()) && success;
+            env->DeleteLocalRef(versionClass);
+        }
+    }
+    if (sdkInt != requestedValues.end()) {
+        jclass versionClass = env->FindClass("android/os/Build$VERSION");
+        if (versionClass == nullptr || env->ExceptionCheck()) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            success = false;
+        } else {
+            success = set_version_int_field(env, versionClass, "SDK_INT", sdkIntValue) && success;
+            env->DeleteLocalRef(versionClass);
+        }
+    }
+    if (model == requestedValues.end() && deviceName != requestedValues.end()) {
+        success = set_build_string_field(env, buildClass, "MODEL", deviceName->second.c_str()) && success;
+    }
+    auto buildTime = requestedValues.find("time");
+    if (buildTime != requestedValues.end()) {
+        char *end = nullptr;
+        long long milliseconds = strtoll(buildTime->second.c_str(), &end, 10);
+        if (end == buildTime->second.c_str() || *end != '\0' || milliseconds < 0) {
+            success = false;
+        } else {
+            jfieldID timeField = env->GetStaticFieldID(buildClass, "TIME", "J");
+            if (timeField == nullptr || env->ExceptionCheck()) {
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                success = false;
+            } else {
+                env->SetStaticLongField(buildClass, timeField, static_cast<jlong>(milliseconds));
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                    success = false;
+                }
+            }
+        }
+    }
+    env->DeleteLocalRef(buildClass);
+    if (!success) return JNI_FALSE;
+
+    {
+        std::lock_guard<std::mutex> lock(custom_build_props_mutex);
+        custom_build_props.swap(nextProperties);
+    }
+    LOGD("Applied %zu custom build properties", requestedValues.size());
+    return JNI_TRUE;
 }
 
 void install_property_get_hook() {

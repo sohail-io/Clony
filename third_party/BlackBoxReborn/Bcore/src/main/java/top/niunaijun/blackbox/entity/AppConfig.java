@@ -19,6 +19,7 @@ public class AppConfig implements Parcelable {
     public int callingBUid;
     public IBinder token;
     public int proxyType;
+    public boolean proxyUdpRelayEnabled;
     public int proxyPort;
     public String proxyHost = "";
     public String proxyUser = "";
@@ -36,6 +37,7 @@ public class AppConfig implements Parcelable {
         bundle.putInt("callingBUid", callingBUid);
         bundle.putBinder("token", token);
         bundle.putInt("proxyType", proxyType);
+        bundle.putBoolean("proxyUdpRelayEnabled", proxyUdpRelayEnabled);
         bundle.putInt("proxyPort", proxyPort);
         bundle.putString("proxyHost", proxyHost);
         bundle.putString("proxyUser", proxyUser);
@@ -54,6 +56,7 @@ public class AppConfig implements Parcelable {
         config.callingBUid = bundle.getInt("callingBUid");
         config.token = bundle.getBinder("token");
         config.proxyType = bundle.getInt("proxyType", 0);
+        config.proxyUdpRelayEnabled = bundle.getBoolean("proxyUdpRelayEnabled", false);
         config.proxyPort = bundle.getInt("proxyPort", 0);
         config.proxyHost = bundle.getString("proxyHost", "");
         config.proxyUser = bundle.getString("proxyUser", "");
@@ -77,6 +80,7 @@ public class AppConfig implements Parcelable {
         dest.writeInt(this.callingBUid);
         dest.writeStrongBinder(token);
         dest.writeInt(proxyType);
+        dest.writeInt(proxyUdpRelayEnabled ? 1 : 0);
         dest.writeInt(proxyPort);
         dest.writeString(proxyHost);
         dest.writeString(proxyUser);
@@ -96,6 +100,7 @@ public class AppConfig implements Parcelable {
         this.callingBUid = in.readInt();
         this.token = in.readStrongBinder();
         this.proxyType = in.readInt();
+        this.proxyUdpRelayEnabled = in.readInt() != 0;
         this.proxyPort = in.readInt();
         this.proxyHost = in.readString();
         this.proxyUser = in.readString();

@@ -13,6 +13,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -57,8 +58,13 @@ private fun proxyProbeFailureMessage(type: Int, result: Int): String {
             "HTTP CONNECT failed (code $code). Check credentials and CONNECT support."
         }
         3 -> "SOCKS5 TCP tunnel worked, but the UDP control connection failed (code $code)."
-        else -> "SOCKS5 TCP tunnel worked, but UDP ASSOCIATE was refused (code $code). " +
-                "This proxy cannot relay UDP/QUIC."
+        else -> if (code == 110) {
+            "SOCKS5 TCP tunnel worked, but UDP ASSOCIATE timed out (code $code). " +
+                    "This proxy may not support UDP/QUIC relay."
+        } else {
+            "SOCKS5 TCP tunnel worked, but UDP ASSOCIATE was refused (code $code). " +
+                    "This proxy may not support UDP/QUIC relay."
+        }
     }
 }
 
@@ -68,6 +74,7 @@ internal fun CloneProxyDialog(app: AppTile, onDismiss: () -> Unit, onSaved: () -
     val scope = rememberCoroutineScope()
     val userId = app.virtualUserId
     var type by remember { mutableIntStateOf(0) }
+    var socksUdpRelayEnabled by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
     var message by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(true) }
@@ -85,6 +92,7 @@ internal fun CloneProxyDialog(app: AppTile, onDismiss: () -> Unit, onSaved: () -
             }
             type = config.type
             input = config.input()
+            socksUdpRelayEnabled = config.socksUdpRelayEnabled
             loaded = true
         } catch (error: Exception) {
             message = error.message ?: "Couldn't load this copy's proxy settings."
@@ -95,7 +103,7 @@ internal fun CloneProxyDialog(app: AppTile, onDismiss: () -> Unit, onSaved: () -
 
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
-        title = { Text("Network · ${app.label} Copy ${app.copyNumber ?: 1}") },
+        title = { Text("Network · ${app.displayName}") },
         text = {
             Column(
                 modifier = Modifier.heightIn(max = 560.dp).verticalScroll(rememberScrollState()),
@@ -129,9 +137,30 @@ internal fun CloneProxyDialog(app: AppTile, onDismiss: () -> Unit, onSaved: () -
                         visualTransformation = PasswordVisualTransformation(),
                         singleLine = true
                     )
+                    if (type == 1) {
+                        Row {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Relay UDP/QUIC through SOCKS5")
+                                Text(
+                                    if (socksUdpRelayEnabled) {
+                                        "Enabled. If the clone turns black or freezes, turn this off."
+                                    } else {
+                                        "Off: TCP uses SOCKS5; UDP/QUIC uses your phone’s normal network."
+                                    },
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                            Switch(
+                                checked = socksUdpRelayEnabled,
+                                onCheckedChange = { socksUdpRelayEnabled = it },
+                                enabled = !busy && loaded
+                            )
+                        }
+                    }
                     Text(
                         if (type == 1) {
-                            "SOCKS5 can relay TCP and UDP/QUIC when the server supports UDP ASSOCIATE. " +
+                            "TCP uses SOCKS5. UDP/QUIC can use the SOCKS5 relay when enabled above and the server " +
+                                    "supports UDP ASSOCIATE; otherwise it uses your phone’s normal network. " +
                                     "DNS uses your phone’s resolver; this is not a VPN."
                         } else {
                             "HTTP CONNECT sends TCP through the proxy. UDP/QUIC uses your phone’s normal network, " +
@@ -145,7 +174,7 @@ internal fun CloneProxyDialog(app: AppTile, onDismiss: () -> Unit, onSaved: () -
                             scope.launch {
                                 busy = true
                                 try {
-                                    val config = CloneProxyConfig.parse(type, input)
+                                    val config = CloneProxyConfig.parse(type, input, socksUdpRelayEnabled)
                                     val result = withContext(Dispatchers.IO) {
                                         NativeCore.probeProxy(
                                             config.type,
@@ -203,10 +232,10 @@ internal fun CloneProxyDialog(app: AppTile, onDismiss: () -> Unit, onSaved: () -
                     scope.launch {
                         busy = true
                         try {
-                            val config = CloneProxyConfig.parse(type, input)
+                            val config = CloneProxyConfig.parse(type, input, socksUdpRelayEnabled)
                             withContext(Dispatchers.IO) {
-                                BlackBoxCore.get().stopPackage(app.packageName, selectedUserId)
                                 CloneProxyStore.save(context, app.packageName, selectedUserId, config)
+                                BlackBoxCore.get().stopPackage(app.packageName, selectedUserId)
                             }
                             onSaved()
                         } catch (error: Exception) {

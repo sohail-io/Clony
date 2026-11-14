@@ -69,6 +69,7 @@ import top.niunaijun.blackbox.core.IOCore;
 import top.niunaijun.blackbox.core.NativeCore;
 import top.niunaijun.blackbox.core.CloneFingerprintStore;
 import top.niunaijun.blackbox.core.CloneDeviceModelStore;
+import top.niunaijun.blackbox.core.CloneBuildPropsStore;
 import top.niunaijun.blackbox.core.env.VirtualRuntime;
 import top.niunaijun.blackbox.core.system.user.BUserHandle;
 import top.niunaijun.blackbox.entity.AppConfig;
@@ -214,10 +215,19 @@ public class BActivityThread extends IBActivityThread.Stub {
             }
             if (!NativeCore.configureProxy(appConfig.proxyType, appConfig.proxyHost, appConfig.proxyPort,
                     appConfig.proxyUser.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                    appConfig.proxyPassword.getBytes(java.nio.charset.StandardCharsets.UTF_8))) {
+                    appConfig.proxyPassword.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    appConfig.proxyUdpRelayEnabled)) {
+                android.util.Log.e("ClonyCloneProxy", "event=proxy_configure result=failure"
+                        + " package=" + appConfig.packageName + " userId=" + appConfig.userId
+                        + " endpoint_or_credentials_logged=false");
                 android.os.Process.killProcess(android.os.Process.myPid());
                 throw new IllegalStateException("Proxy transport initialization failed; direct fallback refused");
             }
+            android.util.Log.i("ClonyCloneProxy", "event=proxy_configure result=success"
+                    + " package=" + appConfig.packageName + " userId=" + appConfig.userId
+                    + " transport=" + (appConfig.proxyType == 2 ? "http_connect_tcp"
+                    : appConfig.proxyType == 1 ? (appConfig.proxyUdpRelayEnabled ? "socks5_tcp_udp" : "socks5_tcp_only") : "direct")
+                    + " endpoint_or_credentials_logged=false");
             this.mAppConfig = appConfig;
             IBinder iBinder = appConfig.token;
             if (iBinder == null || !iBinder.isBinderAlive()) {
@@ -449,6 +459,12 @@ public class BActivityThread extends IBActivityThread.Stub {
         if (deviceModel != null && !deviceModel.isEmpty()
                 && !NativeCore.setDeviceModel(deviceModel)) {
             Slog.w(TAG, "Could not apply the virtual device model for " + packageName);
+        }
+        boolean buildPropsApplied = NativeCore.applyBuildProps(
+                CloneBuildPropsStore.propertyNames(),
+                CloneBuildPropsStore.read(BlackBoxCore.getContext(), packageName, getUserId()));
+        if (!buildPropsApplied) {
+            Slog.w(TAG, "Could not apply virtual build properties for " + packageName);
         }
         assert packageContext != null;
         IOCore.get().enableRedirect(packageContext);

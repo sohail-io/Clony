@@ -7,8 +7,10 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <poll.h>
+#include <android/log.h>
 #include <cerrno>
 #include <cstring>
+#include <atomic>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -30,7 +32,16 @@ static ssize_t (*realRecvMsg)(int,msghdr*,int)=nullptr;
 static int (*realSendMmsg)(int,mmsghdr*,unsigned int,int)=nullptr;
 static int (*realRecvMmsg)(int,mmsghdr*,unsigned int,int,timespec*)=nullptr;
 static bool configured=false;
+static bool socksUdpRelayEnabled=false;
 static std::mutex configLock;
+static constexpr const char* PROXY_LOG_TAG="ClonyCloneProxy";
+// connect() is synchronous at the interception point. Keep its worst-case
+// connect+handshake wait below Android's usual input-dispatch ANR interval.
+static constexpr int PROXY_CONNECT_TIMEOUT_MS=1500;
+static constexpr int PROXY_HANDSHAKE_TIMEOUT_MS=1500;
+static constexpr int PROXY_UDP_TIMEOUT_MS=1500;
+static std::atomic<bool> loggedLocalDatagramBypass{false};
+static std::atomic<bool> loggedDirectUdpBypass{false};
 
 struct UdpPeer {
  sockaddr_storage address{};
@@ -39,6 +50,7 @@ struct UdpPeer {
 static std::mutex udpLock;
 static std::unordered_map<int,UdpPeer> udpPeers;
 static std::unordered_set<int> proxiedUdpFds;
+static std::unordered_map<int,std::unordered_set<unsigned int>> loggedUdpPorts;
 static int udpControlFd=-1;
 static sockaddr_storage udpRelay{};
 static socklen_t udpRelayLength=0;
@@ -47,6 +59,46 @@ static int udpRelayError=0;
 static std::chrono::steady_clock::time_point udpRelayRetryAfter{};
 
 static bool internetAddress(const sockaddr* address){return address&&(address->sa_family==AF_INET||address->sa_family==AF_INET6);}
+static long long elapsedMilliseconds(const std::chrono::steady_clock::time_point& start){
+ return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
+}
+static const char* addressFamilyName(const sockaddr* address){
+ if(!address)return "unknown";
+ if(address->sa_family==AF_INET)return "ipv4";
+ if(address->sa_family==AF_INET6)return "ipv6";
+ return "other";
+}
+static unsigned int addressPort(const sockaddr* address){
+ if(!address)return 0;
+ if(address->sa_family==AF_INET)return ntohs(((const sockaddr_in*)address)->sin_port);
+ if(address->sa_family==AF_INET6)return ntohs(((const sockaddr_in6*)address)->sin6_port);
+ return 0;
+}
+static void logTcpRoute(const char* result,const sockaddr* destination,int error=0,long long elapsedMs=0){
+ __android_log_print(ANDROID_LOG_INFO,PROXY_LOG_TAG,
+                     "event=tcp_route result=%s transport=%s destination_family=%s destination_port=%u error=%d elapsed_ms=%lld proxy_endpoint_logged=false credentials_logged=false",
+                     result,settings.type==2?"http_connect_tcp":"socks5_tcp",
+                     addressFamilyName(destination),addressPort(destination),error,elapsedMs);
+}
+static void logUdpRouteOnce(int fd,const sockaddr* destination,const char* result,const char* reason){
+ unsigned int port=addressPort(destination);
+ if(strcmp(result,"direct_bypass")==0){
+  if(loggedDirectUdpBypass.exchange(true))return;
+ }else{
+ {
+  std::lock_guard<std::mutex> lock(udpLock);
+  if(!loggedUdpPorts[fd].insert(port).second)return;
+ }
+ }
+ __android_log_print(ANDROID_LOG_INFO,PROXY_LOG_TAG,
+                     "event=udp_route result=%s transport=%s destination_family=%s destination_port=%u destination_port_known=%s reason=%s proxy_endpoint_logged=false credentials_logged=false",
+                     result,settings.type==2?"http_connect_tcp":(socksUdpRelayEnabled?"socks5_udp":"socks5_tcp_only"),
+                     addressFamilyName(destination),port,port==0?"false":"true",reason);
+}
+static const sockaddr* connectedUdpPeer(int fd,sockaddr_storage* out,socklen_t* outLength){
+ *outLength=sizeof(*out);
+ return getpeername(fd,(sockaddr*)out,outLength)==0?(const sockaddr*)out:nullptr;
+}
 static bool resolveProxyIPv4(const std::string& host,in_addr* address){
  if(address==nullptr||host.empty()){errno=EINVAL;return false;}
  if(inet_pton(AF_INET,host.c_str(),address)==1)return true;
@@ -70,11 +122,26 @@ static bool loopbackAddress(const sockaddr* address){
  return address->sa_family==AF_INET6&&IN6_IS_ADDR_LOOPBACK(&((const sockaddr_in6*)address)->sin6_addr);
 }
 static int socketType(int fd){int type=0;socklen_t size=sizeof(type);return getsockopt(fd,SOL_SOCKET,SO_TYPE,&type,&size)==0?type:0;}
+static int socketFamily(int fd){
+ sockaddr_storage local{};socklen_t size=sizeof(local);
+ return getsockname(fd,(sockaddr*)&local,&size)==0?local.ss_family:-1;
+}
+static bool internetSocket(int fd){
+ int family=socketFamily(fd);
+ if(family==AF_INET||family==AF_INET6)return true;
+ if(family==AF_UNIX&&!loggedLocalDatagramBypass.exchange(true))
+  __android_log_print(ANDROID_LOG_INFO,PROXY_LOG_TAG,
+                      "event=local_socket_bypass family=unix result=direct reason=non_internet_socket");
+ return false;
+}
 
 static bool failUdpRelay(int error){
  udpRelayFailed=true;
  udpRelayError=error==0?ENETUNREACH:error;
  udpRelayRetryAfter=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+ __android_log_print(ANDROID_LOG_WARN,PROXY_LOG_TAG,
+                     "event=socks5_udp_associate result=failure error=%d proxy_endpoint_logged=false credentials_logged=false",
+                     udpRelayError);
  errno=udpRelayError;
  return false;
 }
@@ -94,16 +161,18 @@ static bool ensureUdpRelay(){
  bool connected=result==0;
  if(result<0&&errno==EINPROGRESS){
   pollfd item{fd,POLLOUT,0};
-  int ready=poll(&item,1,3000);
+  int ready=poll(&item,1,PROXY_UDP_TIMEOUT_MS);
   if(ready>0){int error=0;socklen_t size=sizeof(error);connected=getsockopt(fd,SOL_SOCKET,SO_ERROR,&error,&size)==0&&error==0;if(!connected)errno=error?error:ECONNREFUSED;}
   else errno=ready==0?ETIMEDOUT:errno;
  }
  if(!connected){int error=errno;realClose(fd);return failUdpRelay(error);}
  sockaddr_storage relay{};socklen_t relaySize=0;
- if(!CloneProxy::udpAssociate(fd,settings,&relay,&relaySize,3000)){
+ if(!CloneProxy::udpAssociate(fd,settings,&relay,&relaySize,PROXY_UDP_TIMEOUT_MS)){
   int error=errno;realClose(fd);return failUdpRelay(error);
  }
  udpRelay=relay;udpRelayLength=relaySize;udpControlFd=fd;udpRelayFailed=false;udpRelayError=0;
+ __android_log_print(ANDROID_LOG_INFO,PROXY_LOG_TAG,
+                     "event=socks5_udp_associate result=success proxy_endpoint_logged=false credentials_logged=false");
  return true;
 }
 
@@ -163,7 +232,10 @@ static ssize_t sendUdp(int fd,const void* data,size_t size,int flags,const socka
  }
  if(!internetAddress(destination)){return realSendTo(fd,data,size,flags,destination,destinationLength);}
  if(loopbackAddress(destination))return realSendTo(fd,data,size,flags,destination,destinationLength);
- if(settings.type!=1){errno=ENETUNREACH;return -1;}
+ if(settings.type!=1){
+  logUdpRouteOnce(fd,destination,"direct_bypass","http_connect_carries_tcp_only");
+  return realSendTo(fd,data,size,flags,destination,destinationLength);
+ }
  sockaddr_storage relay{};socklen_t relayLength=0;
  if(!relayForSocket(fd,&relay,&relayLength))return -1;
  std::vector<unsigned char> packet=socksUdpPacket(data,size,destination);
@@ -173,6 +245,7 @@ static ssize_t sendUdp(int fd,const void* data,size_t size,int flags,const socka
  {
   std::lock_guard<std::mutex> lock(udpLock);proxiedUdpFds.insert(fd);
  }
+ logUdpRouteOnce(fd,destination,"proxied","socks5_udp_relay");
  return (ssize_t)size;
 }
 
@@ -265,23 +338,47 @@ static ssize_t receiveUdp(int fd,void* data,size_t capacity,int flags,sockaddr* 
 }
 
 static ssize_t proxySendTo(int fd,const void* data,size_t size,int flags,const sockaddr* address,socklen_t length){
+ if(socketType(fd)!=SOCK_DGRAM||!internetSocket(fd))return realSendTo(fd,data,size,flags,address,length);
+ if(settings.type==2){
+  sockaddr_storage peer{};socklen_t peerLength=0;
+  const sockaddr* destination=address?address:connectedUdpPeer(fd,&peer,&peerLength);
+  if(internetAddress(destination)&&!loopbackAddress(destination))
+   logUdpRouteOnce(fd,destination,"direct_bypass","http_connect_carries_tcp_only");
+  return realSendTo(fd,data,size,flags,address,length);
+ }
  if(socketType(fd)==SOCK_DGRAM&&address==nullptr){UdpPeer peer{};if(!getUdpPeer(fd,&peer))return realSendTo(fd,data,size,flags,address,length);}
  return sendUdp(fd,data,size,flags,address,length);
 }
 static ssize_t proxySend(int fd,const void* data,size_t size,int flags){
+ if(socketType(fd)!=SOCK_DGRAM||!internetSocket(fd))return realSend(fd,data,size,flags);
+ if(settings.type==2){
+  sockaddr_storage peer{};socklen_t peerLength=0;
+  const sockaddr* destination=connectedUdpPeer(fd,&peer,&peerLength);
+  if(internetAddress(destination)&&!loopbackAddress(destination))
+   logUdpRouteOnce(fd,destination,"direct_bypass","http_connect_carries_tcp_only");
+  return realSend(fd,data,size,flags);
+ }
  if(socketType(fd)==SOCK_DGRAM){UdpPeer peer{};if(getUdpPeer(fd,&peer))return sendUdp(fd,data,size,flags,nullptr,0);}
  return realSend(fd,data,size,flags);
 }
 static ssize_t proxyRecvFrom(int fd,void* data,size_t size,int flags,sockaddr* address,socklen_t* length){
- if(socketType(fd)==SOCK_DGRAM)return receiveUdp(fd,data,size,flags,address,length);
+ if(socketType(fd)==SOCK_DGRAM&&internetSocket(fd))return receiveUdp(fd,data,size,flags,address,length);
  return realRecvFrom(fd,data,size,flags,address,length);
 }
 static ssize_t proxyRecv(int fd,void* data,size_t size,int flags){
- if(socketType(fd)==SOCK_DGRAM)return receiveUdp(fd,data,size,flags,nullptr,nullptr);
+ if(socketType(fd)==SOCK_DGRAM&&internetSocket(fd))return receiveUdp(fd,data,size,flags,nullptr,nullptr);
  return realRecv(fd,data,size,flags);
 }
 
 static ssize_t proxySendMsg(int fd,const msghdr* message,int flags){
+ if(socketType(fd)!=SOCK_DGRAM||!internetSocket(fd))return realSendMsg(fd,message,flags);
+ if(settings.type==2){
+  sockaddr_storage peer{};socklen_t peerLength=0;
+  const sockaddr* destination=message->msg_name?(const sockaddr*)message->msg_name:connectedUdpPeer(fd,&peer,&peerLength);
+  if(internetAddress(destination)&&!loopbackAddress(destination))
+   logUdpRouteOnce(fd,destination,"direct_bypass","http_connect_carries_tcp_only");
+  return realSendMsg(fd,message,flags);
+ }
  if(socketType(fd)!=SOCK_DGRAM)return realSendMsg(fd,message,flags);
  if(message->msg_name==nullptr){UdpPeer peer{};if(!getUdpPeer(fd,&peer))return realSendMsg(fd,message,flags);}
  size_t size=0;
@@ -297,7 +394,7 @@ static ssize_t proxySendMsg(int fd,const msghdr* message,int flags){
  return sendUdp(fd,data.data(),size,flags,(const sockaddr*)message->msg_name,message->msg_namelen);
 }
 static ssize_t proxyRecvMsg(int fd,msghdr* message,int flags){
- if(socketType(fd)!=SOCK_DGRAM)return realRecvMsg(fd,message,flags);
+ if(socketType(fd)!=SOCK_DGRAM||!internetSocket(fd))return realRecvMsg(fd,message,flags);
  bool proxied=false;
  {
   std::lock_guard<std::mutex> lock(udpLock);
@@ -325,7 +422,7 @@ static ssize_t proxyRecvMsg(int fd,msghdr* message,int flags){
 }
 
 static int proxySendMmsg(int fd,mmsghdr* messages,unsigned int count,int flags){
- if(socketType(fd)!=SOCK_DGRAM)return realSendMmsg(fd,messages,count,flags);
+ if(socketType(fd)!=SOCK_DGRAM||!internetSocket(fd))return realSendMmsg(fd,messages,count,flags);
  unsigned int sent=0;
  for(;sent<count;sent++){
   ssize_t result=proxySendMsg(fd,&messages[sent].msg_hdr,flags);
@@ -335,7 +432,7 @@ static int proxySendMmsg(int fd,mmsghdr* messages,unsigned int count,int flags){
  return (int)sent;
 }
 static int proxyRecvMmsg(int fd,mmsghdr* messages,unsigned int count,int flags,timespec* timeout){
- if(socketType(fd)!=SOCK_DGRAM)return realRecvMmsg(fd,messages,count,flags,timeout);
+ if(socketType(fd)!=SOCK_DGRAM||!internetSocket(fd))return realRecvMmsg(fd,messages,count,flags,timeout);
  unsigned int received=0;
  for(;received<count;received++){
   int currentFlags=flags;
@@ -359,12 +456,17 @@ static int proxySocket(int family,int type,int protocol){
  int socketTypeValue=type&0xf;
  if((family==AF_INET||family==AF_INET6)&&socketTypeValue!=SOCK_STREAM&&socketTypeValue!=SOCK_DGRAM){errno=EPROTONOSUPPORT;return -1;}
  int fd=realSocket(family,type,protocol);
- if(fd>=0&&family==AF_INET6&&socketTypeValue==SOCK_DGRAM){int dualStack=0;setsockopt(fd,IPPROTO_IPV6,IPV6_V6ONLY,&dualStack,sizeof(dualStack));}
+ // IPv6 destinations are tunneled through an IPv4 proxy endpoint using an
+ // IPv4-mapped IPv6 address. Make TCP sockets dual-stack too, before the app
+ // can bind/connect them, so that this proxy connection is accepted by the
+ // kernel. UDP needs the same setting when relaying to an IPv4 SOCKS endpoint.
+ if(fd>=0&&family==AF_INET6){int dualStack=0;setsockopt(fd,IPPROTO_IPV6,IPV6_V6ONLY,&dualStack,sizeof(dualStack));}
  return fd;
 }
 static int proxyClose(int fd){
- {
-  std::lock_guard<std::mutex> lock(udpLock);udpPeers.erase(fd);proxiedUdpFds.erase(fd);
+ int family=socketFamily(fd);
+ if(family==AF_INET||family==AF_INET6||family<0){
+  std::lock_guard<std::mutex> lock(udpLock);udpPeers.erase(fd);proxiedUdpFds.erase(fd);loggedUdpPorts.erase(fd);
  }
  return realClose(fd);
 }
@@ -381,7 +483,10 @@ static int proxyConnect(int fd,const sockaddr* address,socklen_t length){
  if(loopbackAddress(address))return realConnect(fd,address,length);
  int type=socketType(fd);
  if(type==SOCK_DGRAM){
-  if(settings.type!=1)return realConnect(fd,address,length);
+  if(settings.type!=1||!socksUdpRelayEnabled){
+   logUdpRouteOnce(fd,address,"direct_bypass",settings.type==1?"udp_relay_disabled":"http_connect_carries_tcp_only");
+   return realConnect(fd,address,length);
+  }
   sockaddr_storage local{};socklen_t localLength=sizeof(local);
   if(getsockname(fd,(sockaddr*)&local,&localLength)==0){
    bool unbound=(local.ss_family==AF_INET&&((sockaddr_in*)&local)->sin_port==0)
@@ -396,34 +501,42 @@ static int proxyConnect(int fd,const sockaddr* address,socklen_t length){
   std::lock_guard<std::mutex> lock(udpLock);udpPeers[fd]=peer;return 0;
  }
  if(type!=SOCK_STREAM){errno=ENETUNREACH;return -1;}
+ const auto routeStarted=std::chrono::steady_clock::now();
+ logTcpRoute("attempt",address);
  sockaddr_storage endpoint{};socklen_t endpointSize;
  if(address->sa_family==AF_INET){
   auto p=(sockaddr_in*)&endpoint;p->sin_family=AF_INET;p->sin_port=htons(settings.port);inet_pton(AF_INET,settings.host.c_str(),&p->sin_addr);endpointSize=sizeof(*p);
  }else{
   auto p=(sockaddr_in6*)&endpoint;p->sin6_family=AF_INET6;p->sin6_port=htons(settings.port);inet_pton(AF_INET6,("::ffff:"+settings.host).c_str(),&p->sin6_addr);endpointSize=sizeof(*p);
  }
- int flags=fcntl(fd,F_GETFL,0);if(flags<0)return -1;
- if(fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0)return -1;
+ int flags=fcntl(fd,F_GETFL,0);if(flags<0){int error=errno;logTcpRoute("failure",address,error,elapsedMilliseconds(routeStarted));errno=error;return -1;}
+ if(fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0){int error=errno;logTcpRoute("failure",address,error,elapsedMilliseconds(routeStarted));errno=error;return -1;}
  int r=realConnect(fd,(sockaddr*)&endpoint,endpointSize);
  bool ok=r==0;
- if(r<0&&errno==EISCONN){fcntl(fd,F_SETFL,flags);errno=EISCONN;return -1;}
+ if(r<0&&errno==EISCONN){fcntl(fd,F_SETFL,flags);logTcpRoute("failure",address,EISCONN,elapsedMilliseconds(routeStarted));errno=EISCONN;return -1;}
  if(r<0&&errno==EINPROGRESS){
-  pollfd item{fd,POLLOUT,0};int result=poll(&item,1,4000);
+  pollfd item{fd,POLLOUT,0};int result=poll(&item,1,PROXY_CONNECT_TIMEOUT_MS);
   if(result>0){int error=0;socklen_t size=sizeof(error);ok=getsockopt(fd,SOL_SOCKET,SO_ERROR,&error,&size)==0&&error==0;if(!ok)errno=error?error:ECONNREFUSED;}
   else errno=result==0?ETIMEDOUT:errno;
  }
- if(ok)ok=CloneProxy::handshake(fd,address,settings,4000);
+ if(ok)ok=CloneProxy::handshake(fd,address,settings,PROXY_HANDSHAKE_TIMEOUT_MS);
  int failure=errno;fcntl(fd,F_SETFL,flags);
- if(!ok){shutdown(fd,SHUT_RDWR);errno=failure;return -1;}
+ long long elapsedMs=elapsedMilliseconds(routeStarted);
+ if(!ok){shutdown(fd,SHUT_RDWR);logTcpRoute("failure",address,failure,elapsedMs);errno=failure;return -1;}
+ logTcpRoute("tunneled",address,0,elapsedMs);
  return 0;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_top_niunaijun_blackbox_core_NativeCore_configureProxy(JNIEnv* env,jclass,jint type,jstring host,jint port,jbyteArray user,jbyteArray password){
+Java_top_niunaijun_blackbox_core_NativeCore_configureProxy(JNIEnv* env,jclass,jint type,jstring host,jint port,jbyteArray user,jbyteArray password,jboolean udpRelayEnabled){
  std::lock_guard<std::mutex> lock(configLock);
  if(configured)return JNI_FALSE;
- if(type==0)return JNI_TRUE;
+ if(type==0){
+  __android_log_print(ANDROID_LOG_INFO,PROXY_LOG_TAG,"event=proxy_configure result=disabled transport=direct");
+  return JNI_TRUE;
+ }
  if(type!=1&&type!=2)return JNI_FALSE;
+ socksUdpRelayEnabled=type==1&&udpRelayEnabled==JNI_TRUE;
  const char* text=env->GetStringUTFChars(host,nullptr);settings.host=text;env->ReleaseStringUTFChars(host,text);
  settings.type=type;settings.port=port;
  settings.user.resize(env->GetArrayLength(user));settings.password.resize(env->GetArrayLength(password));
@@ -436,16 +549,27 @@ Java_top_niunaijun_blackbox_core_NativeCore_configureProxy(JNIEnv* env,jclass,ji
  void* connectAddress=dlsym(RTLD_DEFAULT,"connect");
  if(!connectAddress)return JNI_FALSE;
  if(DobbyHook(connectAddress,(void*)proxyConnect,(void**)&realConnect)!=0)return JNI_FALSE;
- if(type==2){configured=true;return JNI_TRUE;}
  void* socketAddress=dlsym(RTLD_DEFAULT,"socket");
- void* closeAddress=dlsym(RTLD_DEFAULT,"close");void* sendAddress=dlsym(RTLD_DEFAULT,"send");void* recvAddress=dlsym(RTLD_DEFAULT,"recv");
- void* sendTo=dlsym(RTLD_DEFAULT,"sendto");void* recvFrom=dlsym(RTLD_DEFAULT,"recvfrom");
- void* sendMsg=dlsym(RTLD_DEFAULT,"sendmsg");void* recvMsg=dlsym(RTLD_DEFAULT,"recvmsg");
- void* sendMmsg=dlsym(RTLD_DEFAULT,"sendmmsg");void* recvMmsg=dlsym(RTLD_DEFAULT,"recvmmsg");
- if(!socketAddress||!closeAddress||!sendAddress||!recvAddress||!sendTo||!recvFrom||!sendMsg||!recvMsg||!sendMmsg||!recvMmsg)return JNI_FALSE;
+ if(!socketAddress)return JNI_FALSE;
  if(DobbyHook(socketAddress,(void*)proxySocket,(void**)&realSocket)!=0)return JNI_FALSE;
+ // HTTP CONNECT only changes TCP connection setup. Leave send/close and all
+ // UDP entry points untouched so local framework IPC never enters proxy hooks.
+ if(type==2||!socksUdpRelayEnabled){
+  configured=true;
+  __android_log_print(ANDROID_LOG_INFO,PROXY_LOG_TAG,
+                      "event=proxy_configure result=success transport=%s udp_hooks=disabled proxy_endpoint_logged=false credentials_logged=false",
+                      type==2?"http_connect_tcp":"socks5_tcp_only");
+  return JNI_TRUE;
+ }
+ void* closeAddress=dlsym(RTLD_DEFAULT,"close");void* sendAddress=dlsym(RTLD_DEFAULT,"send");
+ void* sendTo=dlsym(RTLD_DEFAULT,"sendto");void* sendMsg=dlsym(RTLD_DEFAULT,"sendmsg");
+ void* sendMmsg=dlsym(RTLD_DEFAULT,"sendmmsg");
+ if(!closeAddress||!sendAddress||!sendTo||!sendMsg||!sendMmsg)return JNI_FALSE;
  if(DobbyHook(closeAddress,(void*)proxyClose,(void**)&realClose)!=0)return JNI_FALSE;
  if(DobbyHook(sendAddress,(void*)proxySend,(void**)&realSend)!=0)return JNI_FALSE;
+ void* recvAddress=dlsym(RTLD_DEFAULT,"recv");void* recvFrom=dlsym(RTLD_DEFAULT,"recvfrom");
+ void* recvMsg=dlsym(RTLD_DEFAULT,"recvmsg");void* recvMmsg=dlsym(RTLD_DEFAULT,"recvmmsg");
+ if(!recvAddress||!recvFrom||!recvMsg||!recvMmsg)return JNI_FALSE;
  if(DobbyHook(recvAddress,(void*)proxyRecv,(void**)&realRecv)!=0)return JNI_FALSE;
  if(DobbyHook(sendTo,(void*)proxySendTo,(void**)&realSendTo)!=0)return JNI_FALSE;
  if(DobbyHook(recvFrom,(void*)proxyRecvFrom,(void**)&realRecvFrom)!=0)return JNI_FALSE;
@@ -453,7 +577,10 @@ Java_top_niunaijun_blackbox_core_NativeCore_configureProxy(JNIEnv* env,jclass,ji
  if(DobbyHook(recvMsg,(void*)proxyRecvMsg,(void**)&realRecvMsg)!=0)return JNI_FALSE;
  if(DobbyHook(sendMmsg,(void*)proxySendMmsg,(void**)&realSendMmsg)!=0)return JNI_FALSE;
  if(DobbyHook(recvMmsg,(void*)proxyRecvMmsg,(void**)&realRecvMmsg)!=0)return JNI_FALSE;
- configured=true;return JNI_TRUE;
+ configured=true;
+ __android_log_print(ANDROID_LOG_INFO,PROXY_LOG_TAG,
+                     "event=proxy_configure result=success transport=socks5_tcp_udp udp_observation=enabled proxy_endpoint_logged=false credentials_logged=false");
+ return JNI_TRUE;
 }
 
 static jint proxyProbeFailure(jint stage,int error){

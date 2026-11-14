@@ -1,7 +1,11 @@
 package top.niunaijun.blackbox.fake.service;
 
+import android.os.Bundle;
 import java.lang.reflect.Method;
 
+import top.niunaijun.blackbox.BlackBoxCore;
+import top.niunaijun.blackbox.app.BActivityThread;
+import top.niunaijun.blackbox.core.CloneBuildPropsStore;
 import top.niunaijun.blackbox.fake.hook.ClassInvocationStub;
 import top.niunaijun.blackbox.fake.hook.MethodHook;
 import top.niunaijun.blackbox.fake.hook.ProxyMethod;
@@ -118,8 +122,19 @@ public class IContentProviderProxy extends ClassInvocationStub {
                 
                 AttributionSourceUtils.fixAttributionSourceInArgs(args);
                 
-                
-                return method.invoke(who, args);
+                Object result = method.invoke(who, args);
+                if (result instanceof Bundle && isGlobalDeviceNameLookup(args)) {
+                    String packageName = BActivityThread.getAppPackageName();
+                    int userId = BActivityThread.getUserId();
+                    if (packageName != null && userId >= 0) {
+                        String deviceName = CloneBuildPropsStore.read(
+                                BlackBoxCore.getContext(), packageName, userId)[0];
+                        if (deviceName != null && !deviceName.isEmpty()) {
+                            ((Bundle) result).putString("value", deviceName);
+                        }
+                    }
+                }
+                return result;
             } catch (SecurityException e) {
                 
                 String message = e.getMessage();
@@ -133,6 +148,19 @@ public class IContentProviderProxy extends ClassInvocationStub {
                 
                 return null;
             }
+        }
+
+        private static boolean isGlobalDeviceNameLookup(Object[] args) {
+            if (args == null) return false;
+            boolean globalLookup = false;
+            boolean deviceNameKey = false;
+            for (Object argument : args) {
+                if (!(argument instanceof String)) continue;
+                String value = (String) argument;
+                if ("GET_global".equals(value)) globalLookup = true;
+                if ("device_name".equals(value)) deviceNameKey = true;
+            }
+            return globalLookup && deviceNameKey;
         }
     }
 

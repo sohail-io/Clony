@@ -17,6 +17,7 @@ import top.niunaijun.blackbox.utils.Slog;
 
 public class NativeCore {
     public static final String TAG = "NativeCore";
+    private static final String DEFAULT_OS_VERSION = System.getProperty("os.version");
 
     static {
 
@@ -37,13 +38,40 @@ public class NativeCore {
     public static native boolean disableResourceLoading();
 
     public static native int probeProxy(int type, String host, int port, byte[] username, byte[] password);
-    public static native boolean configureProxy(int type, String host, int port, byte[] username, byte[] password);
+    public static native boolean configureProxy(int type, String host, int port, byte[] username, byte[] password, boolean socksUdpRelayEnabled);
 
     /** Applies the virtual copy's build fingerprint to Android's property and Build APIs. */
     public static native boolean setBuildFingerprint(String fingerprint);
 
     /** Applies an explicitly configured virtual device model to Android's property and Build APIs. */
     public static native boolean setDeviceModel(String model);
+
+    private static native boolean setBuildPropsNative(String[] propertyNames, String[] values);
+
+    /** Applies per-copy Android build properties and Java-visible OS/build version values. */
+    public static boolean applyBuildProps(String[] propertyNames, String[] values) {
+        if (propertyNames == null || values == null || propertyNames.length != values.length) {
+            return false;
+        }
+        String osVersion = null;
+        for (int index = 0; index < propertyNames.length; index++) {
+            if ("osVersion".equals(propertyNames[index])) {
+                osVersion = values[index];
+                break;
+            }
+        }
+        try {
+            String version = osVersion == null || osVersion.isEmpty() ? DEFAULT_OS_VERSION : osVersion;
+            if (version == null || version.isEmpty()) {
+                System.clearProperty("os.version");
+            } else {
+                System.setProperty("os.version", version);
+            }
+        } catch (SecurityException error) {
+            Log.w(TAG, "Could not apply virtual OS version", error);
+        }
+        return setBuildPropsNative(propertyNames, values);
+    }
 
     /** Narrow service-cache access, plus read-only Activity FragmentController access. */
     public static native Object getFrameworkService(Object manager, String interfaceName);

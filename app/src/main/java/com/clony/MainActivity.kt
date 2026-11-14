@@ -33,9 +33,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -49,6 +51,7 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -79,6 +82,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.niunaijun.blackbox.BlackBoxCore
+import top.niunaijun.blackbox.core.CloneBuildPropsStore
 import top.niunaijun.blackbox.core.CloneDeviceModelStore
 import top.niunaijun.blackbox.core.CloneFingerprintStore
 import top.niunaijun.blackbox.fake.service.VirtualDeviceIdentity
@@ -95,6 +99,25 @@ internal const val EXTRA_SHORTCUT_LABEL = "com.clony.extra.SHORTCUT_LABEL"
 private const val SHORTCUT_PREFERENCES = "clone_shortcuts"
 private const val TRACE_TAG = "ClonyTrace"
 
+private fun packageNameDrafts(
+    app: AppTile,
+    count: Int,
+    occupiedPackageNames: Set<String>,
+    firstCopyNumber: Int,
+    existingDrafts: List<String> = emptyList()
+): List<String> {
+    val drafts = existingDrafts.take(count).toMutableList()
+    var copyNumber = firstCopyNumber
+    while (drafts.size < count) {
+        var candidate = ClonePackageNameStore.suggestedName(app.packageName, copyNumber++)
+        while (candidate in occupiedPackageNames || candidate in drafts) {
+            candidate = ClonePackageNameStore.suggestedName(app.packageName, copyNumber++)
+        }
+        drafts += candidate
+    }
+    return drafts
+}
+
 data class AppTile(
     val packageName: String,
     val label: String,
@@ -104,11 +127,12 @@ data class AppTile(
     val copyCount: Int = 0,
     val hasSplitApks: Boolean = false,
     val launcherPackage: String? = null,
-    val launcherInstalled: Boolean = false
+    val launcherInstalled: Boolean = false,
+    val customPackageName: String? = null
 ) {
     val isCloned: Boolean get() = virtualUserId != null
     val displayName: String
-        get() = if (isCloned) "$label ${copyNumber ?: 1}" else label
+        get() = if (isCloned) "$label Copy ${copyNumber ?: 1}" else label
 }
 
 class MainActivity : ComponentActivity() {
@@ -147,6 +171,7 @@ class MainActivity : ComponentActivity() {
     private val messageIsErrorState = mutableStateOf(false)
     private val retryPackageState = mutableStateOf<String?>(null)
     private val retryCopyCountState = mutableStateOf(1)
+    private val retryPackageNamesState = mutableStateOf<List<String>>(emptyList())
     private var refreshJob: Job? = null
     private var cloneUpdateJob: Job? = null
     private var packageUpdateReceiverRegistered = false
@@ -408,8 +433,11 @@ class MainActivity : ComponentActivity() {
                                         )
                                     )
                                 } else {
-                                    copyUserIds.mapIndexed { index, userId ->
+                                    copyUserIds.map { userId ->
                                         val launcher = CloneLaunchers.assign(this@MainActivity, packageName, userId)
+                                        val customPackageName = ClonePackageNameStore.read(
+                                            this@MainActivity, packageName, userId
+                                        )
                                         AppTile(
                                             packageName = packageName,
                                             label = label,
@@ -417,9 +445,12 @@ class MainActivity : ComponentActivity() {
                                             virtualUserId = userId,
                                             launcherPackage = launcher,
                                             launcherInstalled = launcher != null && CloneLaunchers.isInstalled(this@MainActivity, launcher),
-                                            copyNumber = index + 1,
+                                            copyNumber = CloneCopyNameStore.assign(
+                                                this@MainActivity, packageName, userId, customPackageName
+                                            ),
                                             copyCount = copyUserIds.size,
-                                            hasSplitApks = hasSplitApks
+                                            hasSplitApks = hasSplitApks,
+                                            customPackageName = customPackageName
                                         )
                                     }
                                 }
@@ -587,6 +618,15 @@ class MainActivity : ComponentActivity() {
                     }.onFailure {
                         Log.w(TRACE_TAG, "clone_delete stage=device_model_cleanup_failed package=${tile.packageName} userId=$userId", it)
                     }
+                    if (!CloneBuildPropsStore.delete(this@MainActivity, tile.packageName, userId)) {
+                        Log.w(TRACE_TAG, "clone_delete stage=build_props_cleanup_failed package=${tile.packageName} userId=$userId")
+                    }
+                    if (!ClonePackageNameStore.delete(this@MainActivity, tile.packageName, userId)) {
+                        Log.w(TRACE_TAG, "clone_delete stage=package_name_cleanup_failed package=${tile.packageName} userId=$userId")
+                    }
+                    if (!CloneCopyNameStore.remove(this@MainActivity, tile.packageName, userId)) {
+                        Log.w(TRACE_TAG, "clone_delete stage=copy_name_cleanup_failed package=${tile.packageName} userId=$userId")
+                    }
                     if (!VirtualDeviceIdentity.deleteAndroidId(this@MainActivity, tile.packageName, userId)) {
                         Log.w(TRACE_TAG, "clone_delete stage=android_id_cleanup_failed package=${tile.packageName} userId=$userId")
                     }
@@ -599,7 +639,27 @@ class MainActivity : ComponentActivity() {
                 Log.i(TRACE_TAG, "clone_delete stage=shortcut_cleanup_complete package=${tile.packageName} userId=$userId")
                 CloneLaunchers.remove(this@MainActivity, tile.packageName, userId)
                 refreshApps()
-                showInfo("Deleted $label and its app data. Its installed copy app icon is disabled; remove the Clony Copy app from Android if it remains.")
+                val launcherUninstallRequested = tile.launcherPackage?.let { launcherPackage ->
+                    if (CloneLaunchers.isInstalled(this@MainActivity, launcherPackage)) {
+                        runCatching {
+                            startActivity(Intent(
+                                Intent.ACTION_UNINSTALL_PACKAGE,
+                                android.net.Uri.parse("package:$launcherPackage")
+                            ).putExtra(Intent.EXTRA_RETURN_RESULT, true))
+                        }.onFailure {
+                            Log.w(TRACE_TAG, "clone_delete stage=launcher_uninstall_prompt_failed package=$launcherPackage", it)
+                        }.isSuccess
+                    } else {
+                        false
+                    }
+                } ?: false
+                showInfo(
+                    if (launcherUninstallRequested) {
+                        "Deleted $label and its app data. Confirm Android's prompt to remove its app icon."
+                    } else {
+                        "Deleted $label and its app data. Its pinned home screen icon is disabled."
+                    }
+                )
             } catch (error: Throwable) {
                 Log.e(TRACE_TAG, "clone_delete stage=failed package=${tile.packageName} userId=$userId label=$label", error)
                 showError(error.message?.takeIf(String::isNotBlank) ?: "Couldn't delete $label.", null)
@@ -666,9 +726,29 @@ class MainActivity : ComponentActivity() {
 
     private fun shortcutPreferenceKey(packageName: String, userId: Int) = "$packageName:$userId"
 
-    private fun createCopies(tile: AppTile, requestedCopies: Int) {
+    private fun createCopies(
+        tile: AppTile,
+        packageNames: List<String>,
+        buildProps: CloneBuildProps = CloneBuildProps()
+    ) {
         if (busyPackageState.value != null) return
-        val copiesToCreate = requestedCopies.coerceIn(1, MAX_COPIES_PER_APP)
+        val requestedPackageNames = packageNames.map { it.trim() }
+        val copiesToCreate = requestedPackageNames.size
+        if (copiesToCreate !in 1..MAX_COPIES_PER_APP || requestedPackageNames.any { !ClonePackageNameStore.isValid(it) }) {
+            showError("Enter a valid package name for every copy.", null)
+            return
+        }
+        if (requestedPackageNames.distinct().size != requestedPackageNames.size) {
+            showError("Each copy needs a different package name.", null)
+            return
+        }
+        val existingPackageNames = appsState.value.flatMap { app ->
+            listOfNotNull(app.packageName, app.customPackageName)
+        }.toSet()
+        if (requestedPackageNames.any(existingPackageNames::contains)) {
+            showError("Those package names are already in use. Choose unique names for the copies.", null)
+            return
+        }
         val currentCount = appsState.value
             .filter { it.packageName == tile.packageName && it.isCloned }
             .mapNotNull { it.virtualUserId }
@@ -688,6 +768,11 @@ class MainActivity : ComponentActivity() {
                 val createdUserIds = withContext(Dispatchers.IO) {
                     val runtime = BlackBoxCore.get()
                     val users = runtime.getUsers().orEmpty()
+                    if (!CloneBuildPropsStore.writeTemplate(
+                            this@MainActivity, tile.packageName, buildProps.toValues()
+                        )) {
+                        error("Couldn't save the build properties for future copies.")
+                    }
                     val existingCopyCount = users.count { runtime.isInstalled(tile.packageName, it.id) }
                     if (existingCopyCount + copiesToCreate > MAX_COPIES_PER_APP) {
                         error("${tile.label} already has the maximum of $MAX_COPIES_PER_APP copies.")
@@ -695,7 +780,7 @@ class MainActivity : ComponentActivity() {
                     var nextId = maxOf(RUNTIME_USER_ID_START, (users.maxOfOrNull { it.id } ?: 0) + 1)
                     val createdUserIds = mutableListOf<Int>()
                     try {
-                        repeat(copiesToCreate) { index ->
+                repeat(copiesToCreate) { index ->
                             val user = runtime.createUser(nextId++)
                                 ?: error("The virtual runtime couldn't create copy ${index + 1}.")
                             createdUserIds += user.id
@@ -711,6 +796,12 @@ class MainActivity : ComponentActivity() {
                             ) {
                                 error("Couldn't prepare private telephony IDs for copy ${index + 1}.")
                             }
+                            if (!CloneBuildPropsStore.write(
+                                    this@MainActivity, tile.packageName, user.id, buildProps.toValues()
+                                )
+                            ) {
+                                error("Couldn't save build properties for copy ${index + 1}.")
+                            }
                             val result = runtime.installInstalledPackageAsUser(tile.packageName, user.id)
                             if (result == null) {
                                 error("The virtual package service stopped while creating copy ${index + 1}.")
@@ -719,6 +810,15 @@ class MainActivity : ComponentActivity() {
                                 val reason = result.msg?.takeIf(String::isNotBlank)
                                     ?: "The runtime rejected the app package."
                                 error("Copy ${index + 1} failed: $reason")
+                            }
+                            if (!ClonePackageNameStore.write(
+                                    this@MainActivity,
+                                    tile.packageName,
+                                    user.id,
+                                    requestedPackageNames[index]
+                                )
+                            ) {
+                                error("Couldn't save the package name for copy ${index + 1}.")
                             }
                             val googleServices = runtime.installGoogleSignInServices(user.id)
                             if (googleServices.success) {
@@ -742,6 +842,12 @@ class MainActivity : ComponentActivity() {
                                     this@MainActivity, tile.packageName, createdUserId
                                 )
                             }
+                            runCatching {
+                                CloneBuildPropsStore.delete(this@MainActivity, tile.packageName, createdUserId)
+                            }
+                            runCatching {
+                                ClonePackageNameStore.delete(this@MainActivity, tile.packageName, createdUserId)
+                            }
                             runCatching { runtime.deleteUser(createdUserId) }
                         }
                         throw error
@@ -761,6 +867,7 @@ class MainActivity : ComponentActivity() {
                     tile.packageName,
                     copiesToCreate
                 )
+                retryPackageNamesState.value = requestedPackageNames
                 refreshApps()
             }
         }
@@ -769,7 +876,18 @@ class MainActivity : ComponentActivity() {
     private fun retryClone(packageName: String) {
         val tile = appsState.value.firstOrNull { it.packageName == packageName } ?: return
         messageState.value = null
-        createCopies(tile, retryCopyCountState.value)
+        val buildProps = CloneBuildProps.fromValues(
+            CloneBuildPropsStore.readTemplate(this, packageName)
+        )
+        val packageNames = retryPackageNamesState.value
+            .takeIf { it.size == retryCopyCountState.value }
+            ?: List(retryCopyCountState.value) { index ->
+                ClonePackageNameStore.suggestedName(
+                    tile.packageName,
+                    CloneCopyNameStore.nextNumber(this, tile.packageName) + index
+                )
+            }
+        createCopies(tile, packageNames, buildProps)
     }
 
     private fun showProgress(packageName: String, message: String) {
@@ -778,6 +896,7 @@ class MainActivity : ComponentActivity() {
         messageIsErrorState.value = false
         retryPackageState.value = null
         retryCopyCountState.value = 1
+        retryPackageNamesState.value = emptyList()
     }
 
     private fun showInfo(message: String) {
@@ -786,6 +905,7 @@ class MainActivity : ComponentActivity() {
         messageIsErrorState.value = false
         retryPackageState.value = null
         retryCopyCountState.value = 1
+        retryPackageNamesState.value = emptyList()
     }
 
     private fun showError(message: String, packageName: String?, retryCopies: Int = 1) {
@@ -817,7 +937,7 @@ private fun ClonyHome(
     onRetry: (String) -> Unit,
     onRefresh: () -> Unit,
     onOpenClone: (AppTile) -> Unit,
-    onCreateCopies: (AppTile, Int) -> Unit,
+    onCreateCopies: (AppTile, List<String>, CloneBuildProps) -> Unit,
     onPinClone: (AppTile) -> Unit,
     onInstallLauncher: (AppTile) -> Unit,
     onFingerprintSettings: (AppTile, String?) -> Unit,
@@ -831,7 +951,14 @@ private fun ClonyHome(
     var networkSelectionApp by remember { mutableStateOf<AppTile?>(null) }
     var fingerprintSelectionApp by remember { mutableStateOf<AppTile?>(null) }
     var deviceModelSelectionApp by remember { mutableStateOf<AppTile?>(null) }
+    var buildPropsDraft by remember { mutableStateOf(CloneBuildProps()) }
+    var showBuildPropsDialog by remember { mutableStateOf(false) }
     var requestedCopyCount by remember { mutableStateOf(1) }
+    var packageNamesDraft by remember { mutableStateOf(emptyList<String>()) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val occupiedPackageNames = remember(apps) {
+        apps.flatMap { listOfNotNull(it.packageName, it.customPackageName) }.toSet()
+    }
     val clonedApps = remember(apps) {
         apps.filter { it.isCloned }
             .sortedWith(compareBy<AppTile> { it.label.lowercase() }.thenBy { it.copyNumber })
@@ -842,7 +969,8 @@ private fun ClonyHome(
             app.copy(
                 virtualUserId = null,
                 copyNumber = null,
-                copyCount = copies.count { it.isCloned }
+                copyCount = copies.count { it.isCloned },
+                customPackageName = null
             )
         }
         val matches = if (pickerQuery.isBlank()) sources else sources.filter {
@@ -1043,6 +1171,16 @@ private fun ClonyHome(
                                 onClick = {
                                     isPickerOpen = false
                                     requestedCopyCount = 1
+                                    showBuildPropsDialog = false
+                                    buildPropsDraft = CloneBuildProps.fromValues(
+                                        CloneBuildPropsStore.readTemplate(context, app.packageName)
+                                    )
+                                    packageNamesDraft = packageNameDrafts(
+                                        app,
+                                        1,
+                                        occupiedPackageNames,
+                                        CloneCopyNameStore.nextNumber(context, app.packageName)
+                                    )
                                     copySelectionApp = app
                                 }
                             )
@@ -1055,8 +1193,16 @@ private fun ClonyHome(
 
     copySelectionApp?.let { app ->
         val maxForSelection = (MAX_COPIES_PER_APP - app.copyCount).coerceAtLeast(1)
+        val normalizedPackageNames = packageNamesDraft.take(requestedCopyCount).map { it.trim() }
+        val duplicatePackageName = normalizedPackageNames.distinct().size != normalizedPackageNames.size
+        val packageNamesValid = normalizedPackageNames.size == requestedCopyCount &&
+            normalizedPackageNames.all(ClonePackageNameStore::isValid) &&
+            !duplicatePackageName && normalizedPackageNames.none(occupiedPackageNames::contains)
         AlertDialog(
-            onDismissRequest = { copySelectionApp = null },
+            onDismissRequest = {
+                showBuildPropsDialog = false
+                copySelectionApp = null
+            },
             title = { Text("Create copies of ${app.label}") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1067,7 +1213,15 @@ private fun ClonyHome(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         OutlinedButton(
-                            onClick = { requestedCopyCount = (requestedCopyCount - 1).coerceAtLeast(1) },
+                            onClick = {
+                                val nextCount = (requestedCopyCount - 1).coerceAtLeast(1)
+                                requestedCopyCount = nextCount
+                                packageNamesDraft = packageNameDrafts(
+                                    app, nextCount, occupiedPackageNames,
+                                    CloneCopyNameStore.nextNumber(context, app.packageName),
+                                    packageNamesDraft
+                                )
+                            },
                             enabled = requestedCopyCount > 1
                         ) { Text("−") }
                         Text(
@@ -1077,33 +1231,103 @@ private fun ClonyHome(
                             fontWeight = FontWeight.Bold
                         )
                         OutlinedButton(
-                            onClick = { requestedCopyCount = (requestedCopyCount + 1).coerceAtMost(maxForSelection) },
+                            onClick = {
+                                val nextCount = (requestedCopyCount + 1).coerceAtMost(maxForSelection)
+                                requestedCopyCount = nextCount
+                                packageNamesDraft = packageNameDrafts(
+                                    app, nextCount, occupiedPackageNames,
+                                    CloneCopyNameStore.nextNumber(context, app.packageName),
+                                    packageNamesDraft
+                                )
+                            },
                             enabled = requestedCopyCount < maxForSelection
                         ) { Text("+") }
                     }
+                    Column(
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "These identifiers appear in Clony. Apps running inside each copy retain the source package identity.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        repeat(requestedCopyCount) { index ->
+                            val value = packageNamesDraft.getOrElse(index) { "" }
+                            val normalizedValue = value.trim()
+                            val isDuplicate = normalizedValue.isNotEmpty() &&
+                                normalizedPackageNames.count { it == normalizedValue } > 1
+                            val isAlreadyUsed = normalizedValue in occupiedPackageNames
+                            val isInvalid = !ClonePackageNameStore.isValid(normalizedValue)
+                            val errorMessage = when {
+                                isInvalid -> "Use a dotted package name, such as com.example.app.clone1."
+                                isDuplicate -> "Each copy needs a different package name."
+                                isAlreadyUsed -> "This package name is already in use."
+                                else -> null
+                            }
+                            OutlinedTextField(
+                                value = value,
+                                onValueChange = { updatedValue ->
+                                    packageNamesDraft = packageNamesDraft.toMutableList().also {
+                                        if (index < it.size) it[index] = updatedValue
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text("Copy ${index + 1} package name") },
+                                singleLine = true,
+                                isError = errorMessage != null,
+                                supportingText = if (errorMessage != null) {
+                                    { Text(errorMessage) }
+                                } else null
+                            )
+                        }
+                    }
                     Text("Up to $MAX_COPIES_PER_APP copies per app.", style = MaterialTheme.typography.bodySmall)
+                    OutlinedButton(
+                        onClick = { showBuildPropsDialog = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Build props · ${buildPropsDraft.overrideCount} overrides")
+                    }
                 }
             },
             confirmButton = {
                 TextButton(
+                    enabled = packageNamesValid,
                     onClick = {
-                        onCreateCopies(app, requestedCopyCount)
+                        onCreateCopies(app, normalizedPackageNames, buildPropsDraft)
+                        showBuildPropsDialog = false
                         copySelectionApp = null
                     }
                 ) { Text("Create $requestedCopyCount") }
             },
             dismissButton = {
-                TextButton(onClick = { copySelectionApp = null }) { Text("Cancel") }
+                TextButton(onClick = {
+                    showBuildPropsDialog = false
+                    copySelectionApp = null
+                }) { Text("Cancel") }
             }
         )
+        if (showBuildPropsDialog) {
+            CloneBuildPropsDialog(
+                appLabel = app.label,
+                initialProps = buildPropsDraft,
+                onDismiss = { showBuildPropsDialog = false },
+                onSave = {
+                    buildPropsDraft = it
+                    showBuildPropsDialog = false
+                }
+            )
+        }
     }
 
     deleteSelectionApp?.let { app ->
         AlertDialog(
             onDismissRequest = { deleteSelectionApp = null },
-            title = { Text("Delete ${app.label} Copy ${app.copyNumber ?: 1}?") },
+            title = { Text("Delete ${app.displayName}?") },
             text = {
-                Text("This permanently removes the copy and its app data. Clony disables its app-drawer launcher and home screen shortcut; you may need to remove those icons from Android manually.")
+                Text("This permanently removes the copy and its app data. Clony disables its pinned home screen shortcut. Android will ask whether to uninstall its separate app icon.")
             },
             confirmButton = {
                 TextButton(
@@ -1265,12 +1489,19 @@ private fun AppGridTile(
         Column(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(9.dp)
+            verticalArrangement = Arrangement.spacedBy(3.dp)
         ) {
             Text(
                 app.displayName,
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                app.customPackageName ?: app.packageName,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )

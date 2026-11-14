@@ -58,6 +58,7 @@ public class ProcessRecord extends Binder {
                 top.niunaijun.blackbox.core.network.CloneProxyStore.read(
                         top.niunaijun.blackbox.BlackBoxCore.getContext(), info.packageName, userId);
         config.proxyType = proxy.type;
+        config.proxyUdpRelayEnabled = proxy.socksUdpRelayEnabled;
         config.proxyPort = proxy.port;
         config.proxyHost = proxy.host;
         config.proxyUser = proxy.username;

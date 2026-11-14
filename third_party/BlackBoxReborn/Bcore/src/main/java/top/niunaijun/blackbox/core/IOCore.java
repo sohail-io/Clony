@@ -140,15 +140,15 @@ public class IOCore {
                 rule.put("/sdcard", external.getAbsolutePath());
                 rule.put(String.format("/storage/emulated/%d", systemUserId), external.getAbsolutePath());
 
-                // Keep public media folders on the device's shared volume. Clones
-                // still get isolated Android/data and Android/obb directories,
-                // while media pickers can see photos and videos stored by the user.
+                // Keep user-facing media folders on the device's shared volume so
+                // media pickers can see photos and videos stored by the user.
+                // Android/media stays redirected with Android/data and Android/obb
+                // because apps can keep clone-specific state there.
                 for (String directory : new String[]{
                         "DCIM",
                         "Pictures",
                         "Movies",
-                        "Download",
-                        "Android/media"
+                        "Download"
                 }) {
                     blackRule.add("/sdcard/" + directory);
                     blackRule.add(String.format("/storage/emulated/%d/%s", systemUserId, directory));

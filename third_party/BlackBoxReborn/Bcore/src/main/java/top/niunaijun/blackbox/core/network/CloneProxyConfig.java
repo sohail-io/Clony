@@ -2,12 +2,20 @@ package top.niunaijun.blackbox.core.network;
 import java.nio.charset.StandardCharsets;
 public final class CloneProxyConfig {
  public final int type, port;
+ public final boolean socksUdpRelayEnabled;
  public final String host, username, password;
  public CloneProxyConfig(int type, String host, int port, String username, String password) {
+  this(type,host,port,username,password,false);
+ }
+ public CloneProxyConfig(int type, String host, int port, String username, String password, boolean socksUdpRelayEnabled) {
   this.type=type; this.host=host; this.port=port; this.username=username; this.password=password;
+  this.socksUdpRelayEnabled=type==1&&socksUdpRelayEnabled;
  }
  public static CloneProxyConfig parse(int type, String value) {
-  if(type==0)return new CloneProxyConfig(0,"",0,"","");
+  return parse(type,value,false);
+ }
+ public static CloneProxyConfig parse(int type, String value, boolean socksUdpRelayEnabled) {
+  if(type==0)return new CloneProxyConfig(0,"",0,"","",false);
   if(type!=1&&type!=2)throw new IllegalArgumentException("Choose SOCKS5, HTTP or No proxy.");
   String[] parts=value.split(":",4);
   if(parts.length!=2&&parts.length!=4)throw new IllegalArgumentException("Use host:port or host:port:user:pass.");
@@ -20,7 +28,7 @@ public final class CloneProxyConfig {
   if(parts.length==4&&(user.isEmpty()||pass.isEmpty()))throw new IllegalArgumentException("Enter both username and password, or use host:port.");
   if(user.indexOf('\r')>=0||user.indexOf('\n')>=0||pass.indexOf('\r')>=0||pass.indexOf('\n')>=0||user.indexOf('\0')>=0||pass.indexOf('\0')>=0)throw new IllegalArgumentException("Credentials cannot contain control separators.");
   if(user.getBytes(StandardCharsets.UTF_8).length>255||pass.getBytes(StandardCharsets.UTF_8).length>255)throw new IllegalArgumentException("Credentials must be at most 255 UTF-8 bytes each.");
-  return new CloneProxyConfig(type,parts[0],port,user,pass);
+  return new CloneProxyConfig(type,parts[0],port,user,pass,socksUdpRelayEnabled);
  }
  private static void validateHost(String host) {
   if(host.isEmpty()||host.length()>253)throw new IllegalArgumentException("Enter a valid IPv4 address or proxy hostname.");

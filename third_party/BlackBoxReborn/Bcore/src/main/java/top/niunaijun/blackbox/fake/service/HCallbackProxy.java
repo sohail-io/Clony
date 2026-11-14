@@ -1,5 +1,6 @@
 package top.niunaijun.blackbox.fake.service;
 
+import android.app.Activity;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
@@ -22,7 +23,9 @@ import black.android.app.BRActivityManagerNative;
 import black.android.app.BRActivityThread;
 import black.android.app.BRActivityThreadActivityClientRecord;
 import black.android.app.BRActivityThreadCreateServiceData;
+import black.android.app.BRResultInfo;
 import black.android.app.BRIActivityManager;
+import black.android.app.servertransaction.BRActivityResultItem;
 import black.android.app.servertransaction.BRClientTransaction;
 import black.android.app.servertransaction.BRLaunchActivityItem;
 import black.android.app.servertransaction.LaunchActivityItemContext;
@@ -32,6 +35,7 @@ import top.niunaijun.blackbox.app.BActivityThread;
 import top.niunaijun.blackbox.fake.hook.IInjectHook;
 import top.niunaijun.blackbox.proxy.ProxyManifest;
 import top.niunaijun.blackbox.proxy.record.ProxyActivityRecord;
+import top.niunaijun.blackbox.utils.PersistableUriGrant;
 import top.niunaijun.blackbox.utils.Slog;
 import top.niunaijun.blackbox.utils.compat.BuildCompat;
 import top.niunaijun.blackbox.utils.compat.BundleCompat;
@@ -78,6 +82,7 @@ public class HCallbackProxy implements IInjectHook, Handler.Callback {
             try {
                 if (BuildCompat.isPie()) {
                     if (msg.what == EXECUTE_TRANSACTION) {
+                        preserveActivityResultUris(msg.obj);
                         if (handleLaunchActivity(msg.obj)) {
                             getH().sendMessageAtFrontOfQueue(Message.obtain(msg));
                             return true;
@@ -119,6 +124,28 @@ public class HCallbackProxy implements IInjectHook, Handler.Callback {
             }
         }
         return null;
+    }
+
+    private void preserveActivityResultUris(Object clientTransaction) {
+        try {
+            List<Object> callbacks = BRClientTransaction.get(clientTransaction).mActivityCallbacks();
+            if (callbacks == null) return;
+            Class<?> resultItemClass = BRActivityResultItem.getRealClass();
+            for (Object callback : callbacks) {
+                if (callback == null || !resultItemClass.isInstance(callback)) continue;
+                List<?> results = BRActivityResultItem.get(callback).mResultInfoList();
+                if (results == null) continue;
+                for (Object result : results) {
+                    if (result == null) continue;
+                    black.android.app.ResultInfoContext resultInfo = BRResultInfo.get(result);
+                    if (Integer.valueOf(Activity.RESULT_OK).equals(resultInfo.mResultCode())) {
+                        PersistableUriGrant.preserve(resultInfo.mData());
+                    }
+                }
+            }
+        } catch (Throwable error) {
+            Slog.w(TAG, "Could not preserve URI access from an activity result", error);
+        }
     }
 
     private boolean handleLaunchActivity(Object client) {

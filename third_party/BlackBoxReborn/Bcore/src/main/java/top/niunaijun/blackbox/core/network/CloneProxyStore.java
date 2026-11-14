@@ -13,6 +13,7 @@ import javax.crypto.spec.GCMParameterSpec;
 /** Atomic encrypted files avoid stale cross-process SharedPreferences reads. */
 public final class CloneProxyStore {
  private static final String ALIAS="clony_proxy_credentials_v1";
+ private static final String LOG_TAG="ClonyCloneProxySettings";
  private static File path(Context c,String pkg,int user) {
   if(!pkg.matches("[A-Za-z0-9_.]+")||user<0)throw new IllegalArgumentException("Invalid clone identity");
   File dir=new File(c.getFilesDir(),"clone-proxies");
@@ -31,7 +32,10 @@ public final class CloneProxyStore {
  }
  public static synchronized CloneProxyConfig read(Context c,String pkg,int user) {
   AtomicFile file=new AtomicFile(path(c,pkg,user));
-  if(!file.getBaseFile().exists()&&!new File(file.getBaseFile().getPath()+".bak").exists())return CloneProxyConfig.parse(0,"");
+  if(!file.getBaseFile().exists()&&!new File(file.getBaseFile().getPath()+".bak").exists()){
+   android.util.Log.i(LOG_TAG,"event=proxy_settings_read result=missing package="+pkg+" userId="+user+" type=0");
+   return CloneProxyConfig.parse(0,"");
+  }
   try {
    byte[] bytes=file.readFully();
    if(bytes.length<29)throw new IOException("Invalid settings");
@@ -39,19 +43,23 @@ public final class CloneProxyStore {
    cipher.init(Cipher.DECRYPT_MODE,key(false),new GCMParameterSpec(128,bytes,0,12));
    cipher.updateAAD((pkg+":"+user).getBytes(StandardCharsets.UTF_8));
    JSONObject json=new JSONObject(new String(cipher.doFinal(bytes,12,bytes.length-12),StandardCharsets.UTF_8));
-   return CloneProxyConfig.parse(json.getInt("type"),json.getString("input"));
+   CloneProxyConfig config=CloneProxyConfig.parse(json.getInt("type"),json.getString("input"),json.optBoolean("socksUdpRelayEnabled",false));
+   android.util.Log.i(LOG_TAG,"event=proxy_settings_read result=success package="+pkg+" userId="+user+" type="+config.type+" udpRelay="+config.socksUdpRelayEnabled+" endpoint_or_credentials_logged=false");
+   return config;
   }catch(Exception error){throw new IllegalStateException("Cannot read this clone's proxy settings; refusing direct fallback.");}
  }
  public static synchronized void save(Context c,String pkg,int user,CloneProxyConfig config) {
   AtomicFile file=new AtomicFile(path(c,pkg,user));
-  if(config.type==0){file.delete();if(file.getBaseFile().exists())throw new IllegalStateException("Couldn't remove proxy settings");return;}
+  if(config.type==0){file.delete();if(file.getBaseFile().exists())throw new IllegalStateException("Couldn't remove proxy settings");android.util.Log.i(LOG_TAG,"event=proxy_settings_save result=success package="+pkg+" userId="+user+" type=0");return;}
   FileOutputStream out=null;
   try {
    Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");cipher.init(Cipher.ENCRYPT_MODE,key(true));
    cipher.updateAAD((pkg+":"+user).getBytes(StandardCharsets.UTF_8));
    JSONObject json=new JSONObject();json.put("type",config.type);json.put("input",config.input());
+   json.put("socksUdpRelayEnabled",config.socksUdpRelayEnabled);
    byte[] encrypted=cipher.doFinal(json.toString().getBytes(StandardCharsets.UTF_8));
    out=file.startWrite();out.write(cipher.getIV());out.write(encrypted);file.finishWrite(out);
+   android.util.Log.i(LOG_TAG,"event=proxy_settings_save result=success package="+pkg+" userId="+user+" type="+config.type+" udpRelay="+config.socksUdpRelayEnabled+" endpoint_or_credentials_logged=false");
   }catch(Exception error){if(out!=null)file.failWrite(out);throw new IllegalStateException("Couldn't securely save proxy settings.");}
  }
  public static synchronized void delete(Context c,String pkg,int user) {
