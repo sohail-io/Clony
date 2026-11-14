@@ -26,6 +26,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.IInterface;
 import android.os.Looper;
+import android.os.Parcel;
 import android.os.RemoteException;
 import android.os.StrictMode;
 import android.text.TextUtils;
@@ -96,6 +97,7 @@ public class BActivityThread extends IBActivityThread.Stub {
 
     private static BActivityThread sBActivityThread;
     private AppBindData mBoundApplication;
+    private volatile PackageInfo mBoundPackageInfo;
     private Application mInitialApplication;
     private AppConfig mAppConfig;
     private final List<ProviderInfo> mProviders = new ArrayList<>();
@@ -125,6 +127,27 @@ public class BActivityThread extends IBActivityThread.Stub {
 
     public static List<ProviderInfo> getProviders() {
         return currentActivityThread().mProviders;
+    }
+
+    /**
+     * Returns the package metadata already used to bind this virtual process.
+     * This is a last-resort self-query fallback if the virtual package service
+     * temporarily cannot resolve the running package for its virtual user.
+     */
+    public static PackageInfo getBoundPackageInfo(String packageName) {
+        PackageInfo boundPackageInfo = currentActivityThread().mBoundPackageInfo;
+        if (boundPackageInfo == null || !TextUtils.equals(packageName, boundPackageInfo.packageName)) {
+            return null;
+        }
+
+        Parcel parcel = Parcel.obtain();
+        try {
+            boundPackageInfo.writeToParcel(parcel, 0);
+            parcel.setDataPosition(0);
+            return PackageInfo.CREATOR.createFromParcel(parcel);
+        } finally {
+            parcel.recycle();
+        }
     }
 
     public static String getAppProcessName() {
@@ -376,6 +399,7 @@ public class BActivityThread extends IBActivityThread.Stub {
             throw new IllegalStateException("Missing virtual package metadata: " + packageName
                     + " userId=" + getUserId());
         }
+        mBoundPackageInfo = packageInfo;
         ApplicationInfo applicationInfo = packageInfo.applicationInfo;
         if (packageInfo.providers == null) {
             packageInfo.providers = new ProviderInfo[]{};

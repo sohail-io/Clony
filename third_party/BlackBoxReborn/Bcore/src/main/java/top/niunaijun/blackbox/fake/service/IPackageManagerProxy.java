@@ -190,7 +190,23 @@ public class IPackageManagerProxy extends BinderInvocationStub {
                 } catch (Exception ignored) {}
             }
             
-            PackageInfo packageInfo = BlackBoxCore.getBPackageManager().getPackageInfo(packageName, flags, BlackBoxCore.getUserId());
+            int userId = BActivityThread.getUserId();
+            PackageInfo packageInfo = BlackBoxCore.getBPackageManager()
+                    .getPackageInfo(packageName, flags, userId);
+            if (packageInfo == null && packageName != null
+                    && packageName.equals(BActivityThread.getAppPackageName())) {
+                // TikTok's FileStorage initialization queries its own package info.
+                // If the virtual package service misses this self-query, returning
+                // null makes ApplicationPackageManager throw NameNotFoundException
+                // and the app treats its saved storage as unavailable. The running
+                // process was bound from valid virtual metadata, so use that snapshot
+                // for this package only rather than exposing host package metadata.
+                packageInfo = BActivityThread.getBoundPackageInfo(packageName);
+                if (packageInfo != null) {
+                    Slog.w(TAG, "Using bound virtual package metadata after self-query miss"
+                            + " package=" + packageName + " userId=" + userId);
+                }
+            }
             if (packageInfo != null) {
                 
                 if (packageInfo.requestedPermissions != null && packageInfo.requestedPermissionsFlags != null) {
