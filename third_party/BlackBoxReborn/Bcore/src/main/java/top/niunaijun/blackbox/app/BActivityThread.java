@@ -101,6 +101,8 @@ public class BActivityThread extends IBActivityThread.Stub {
     private volatile PackageInfo mBoundPackageInfo;
     private Application mInitialApplication;
     private AppConfig mAppConfig;
+    private int mLastKnownUserId;
+    private boolean mHasLastKnownUserId;
     private final List<ProviderInfo> mProviders = new ArrayList<>();
     private final Handler mH = BlackBoxCore.get().getHandler();
     private static final Object mConfigLock = new Object();
@@ -196,7 +198,13 @@ public class BActivityThread extends IBActivityThread.Stub {
     }
 
     public static int getUserId() {
-        return getAppConfig() == null ? 0 : getAppConfig().userId;
+        synchronized (mConfigLock) {
+            BActivityThread thread = currentActivityThread();
+            if (thread.mAppConfig != null) {
+                return thread.mAppConfig.userId;
+            }
+            return thread.mHasLastKnownUserId ? thread.mLastKnownUserId : 0;
+        }
     }
 
     public void initProcess(AppConfig appConfig) {
@@ -228,6 +236,8 @@ public class BActivityThread extends IBActivityThread.Stub {
                     + " transport=" + (appConfig.proxyType == 2 ? "http_connect_tcp"
                     : appConfig.proxyType == 1 ? (appConfig.proxyUdpRelayEnabled ? "socks5_tcp_udp" : "socks5_tcp_only") : "direct")
                     + " endpoint_or_credentials_logged=false");
+            this.mLastKnownUserId = appConfig.userId;
+            this.mHasLastKnownUserId = true;
             this.mAppConfig = appConfig;
             IBinder iBinder = appConfig.token;
             if (iBinder == null || !iBinder.isBinderAlive()) {
@@ -240,7 +250,10 @@ public class BActivityThread extends IBActivityThread.Stub {
                     public void binderDied() {
                         synchronized (mConfigLock) {
                             iBinder.unlinkToDeath(this, 0);
+                            int lastKnownUserId = mAppConfig == null ? mLastKnownUserId : mAppConfig.userId;
                             mAppConfig = null;
+                            Slog.w(TAG, "Virtual process owner died; retaining virtual user ID="
+                                    + lastKnownUserId + " for activity routing");
                         }
                     }
                 }, 0);

@@ -17,8 +17,10 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +31,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -39,7 +42,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -64,9 +66,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -131,13 +138,14 @@ data class AppTile(
     val customPackageName: String? = null
 ) {
     val isCloned: Boolean get() = virtualUserId != null
-    val displayName: String
-        get() = if (isCloned) "$label Copy ${copyNumber ?: 1}" else label
+    val displayName: String get() = if (isCloned) "$label ${copyNumber ?: 1}" else label
 }
 
 class MainActivity : ComponentActivity() {
     private var launcherQueue = LauncherInstallQueue()
     private var waitingForInstallPermission = false
+    private val pendingHomeShortcutPins = mutableListOf<AppTile>()
+    private var homeShortcutPinInFlight = false
     private val launcherPermissionResult = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) {
@@ -205,7 +213,7 @@ class MainActivity : ComponentActivity() {
         refreshApps()
         setContent {
             ClonyTheme {
-                ClonyHome(
+                ClonyHomeRedesigned(
                     apps = appsState.value,
                     message = messageState.value,
                     messageIsError = messageIsErrorState.value,
@@ -221,10 +229,8 @@ class MainActivity : ComponentActivity() {
                     onRefresh = ::refreshApps,
                     onOpenClone = ::openClone,
                     onCreateCopies = ::createCopies,
-                    onPinClone = ::pinCloneShortcut,
-                    onInstallLauncher = ::installLauncher,
-                    onFingerprintSettings = ::saveFingerprint,
-                    onDeviceModelSettings = ::saveDeviceModel,
+                    onSaveBuildPropsTemplate = ::saveBuildPropsTemplate,
+                    onPinClone = { tile -> pinCloneShortcut(tile) },
                     onDeleteClone = ::deleteClone
                 )
             }
@@ -265,19 +271,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun installCreatedLaunchers(packageName: String, userIds: List<Int>) {
-        try {
-            val packages = userIds.map { userId ->
-                CloneLaunchers.assign(this, packageName, userId)
-                    ?: error("All 100 copy app slots have been used.")
-            }
-            launcherQueue.add(packages)
-            advanceLauncherQueue()
-        } catch (error: Exception) {
-            showError("The copies were created, but app icon setup failed: ${error.message.orEmpty()}", null)
-        }
-    }
-
     private fun installLauncher(tile: AppTile) {
         val launcher = tile.launcherPackage
             ?: return showError("No app icon slot is available for this copy.", null)
@@ -299,6 +292,10 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         logLifecycle("onResume")
+        if (homeShortcutPinInFlight) {
+            homeShortcutPinInFlight = false
+            advanceHomeShortcutPins()
+        }
         refreshApps()
         syncOutdatedClones()
     }
@@ -434,7 +431,9 @@ class MainActivity : ComponentActivity() {
                                     )
                                 } else {
                                     copyUserIds.map { userId ->
-                                        val launcher = CloneLaunchers.assign(this@MainActivity, packageName, userId)
+                                        // Preserve launcher APKs installed by older versions. New copies
+                                        // use Android's pinned shortcut so their icon and name match the app.
+                                        val launcher = CloneLaunchers.existing(this@MainActivity, packageName, userId)
                                         val customPackageName = ClonePackageNameStore.read(
                                             this@MainActivity, packageName, userId
                                         )
@@ -502,13 +501,13 @@ class MainActivity : ComponentActivity() {
     }
 
 
-    private fun pinCloneShortcut(tile: AppTile) {
-        val userId = tile.virtualUserId ?: return
+    private fun pinCloneShortcut(tile: AppTile): Boolean {
+        val userId = tile.virtualUserId ?: return false
         val pinSupported = ShortcutManagerCompat.isRequestPinShortcutSupported(this)
         Log.i(TRACE_TAG, "shortcut_pin stage=begin package=${tile.packageName} userId=$userId supported=$pinSupported")
         if (!pinSupported) {
             showError("The current launcher doesn't support adding home screen icons.", null)
-            return
+            return false
         }
 
         val shortcutLabel = tile.displayName
@@ -532,7 +531,7 @@ class MainActivity : ComponentActivity() {
         }.getOrElse { error ->
             Log.e(TRACE_TAG, "shortcut_pin stage=build_failed package=${tile.packageName} userId=$userId", error)
             showError(error.message?.takeIf(String::isNotBlank) ?: "Couldn't create the home screen icon.", null)
-            return
+            return false
         }
         val callbackIntent = Intent(this, ShortcutPinResultReceiver::class.java).apply {
             action = ACTION_SHORTCUT_PINNED
@@ -562,7 +561,7 @@ class MainActivity : ComponentActivity() {
         Log.i(TRACE_TAG, "shortcut_pin stage=checked_existing package=${tile.packageName} userId=$userId shortcutId=$shortcutId alreadyPinned=$alreadyPinned")
         if (alreadyPinned) {
             showInfo("$shortcutLabel already has a home screen icon.")
-            return
+            return false
         }
         val requested = runCatching {
             ShortcutManagerCompat.requestPinShortcut(this, shortcut, callback.intentSender)
@@ -578,12 +577,40 @@ class MainActivity : ComponentActivity() {
         } else {
             showError("The launcher couldn't add this copy icon.", null)
         }
+        return requested
+    }
+
+    private fun queueHomeShortcutsForCopies(source: AppTile, userIds: List<Int>) {
+        pendingHomeShortcutPins.clear()
+        userIds.forEach { userId ->
+            pendingHomeShortcutPins += source.copy(
+                virtualUserId = userId,
+                copyNumber = CloneCopyNameStore.assign(
+                    this,
+                    source.packageName,
+                    userId,
+                    ClonePackageNameStore.read(this, source.packageName, userId)
+                )
+            )
+        }
+        advanceHomeShortcutPins()
+    }
+
+    /** Ask for one home-screen pin at a time; returning from the launcher advances the queue. */
+    private fun advanceHomeShortcutPins() {
+        if (homeShortcutPinInFlight) return
+        while (pendingHomeShortcutPins.isNotEmpty()) {
+            val next = pendingHomeShortcutPins.removeAt(0)
+            homeShortcutPinInFlight = true
+            if (pinCloneShortcut(next)) return
+            homeShortcutPinInFlight = false
+        }
     }
 
     private fun deleteClone(tile: AppTile) {
         val userId = tile.virtualUserId ?: return
         if (busyPackageState.value != null) return
-        val label = "${tile.label} Copy ${tile.copyNumber ?: 1}"
+        val label = tile.displayName
         Log.i(TRACE_TAG, "clone_delete stage=begin package=${tile.packageName} userId=$userId label=$label")
         showProgress(tile.packageName, "Deleting $label and its app data…")
         lifecycleScope.launch {
@@ -655,9 +682,9 @@ class MainActivity : ComponentActivity() {
                 } ?: false
                 showInfo(
                     if (launcherUninstallRequested) {
-                        "Deleted $label and its app data. Confirm Android's prompt to remove its app icon."
+                        "Deleted $label and its app data. Its pinned Home screen shortcut is disabled. Confirm Android's prompt to remove its separate launcher icon."
                     } else {
-                        "Deleted $label and its app data. Its pinned home screen icon is disabled."
+                        "Deleted $label and its app data. Its pinned Home screen shortcut is disabled."
                     }
                 )
             } catch (error: Throwable) {
@@ -692,6 +719,27 @@ class MainActivity : ComponentActivity() {
             } catch (error: Throwable) {
                 Log.e(TRACE_TAG, "fingerprint_save failed package=${tile.packageName} userId=$userId", error)
                 showError(error.message?.takeIf(String::isNotBlank) ?: "Couldn't save the device fingerprint.", null)
+            }
+        }
+    }
+
+    private fun saveBuildPropsTemplate(tile: AppTile, props: CloneBuildProps) {
+        val normalized = props.normalized()
+        if (!CloneBuildPropsStore.isValid(normalized.toValues())) {
+            showError("Build properties contain an invalid value.", null)
+            return
+        }
+        lifecycleScope.launch {
+            try {
+                val saved = withContext(Dispatchers.IO) {
+                    CloneBuildPropsStore.writeTemplate(this@MainActivity, tile.packageName, normalized.toValues())
+                }
+                if (!saved) error("Couldn't save the build properties.")
+                val status = if (normalized.overrideCount == 0) "reset" else "saved"
+                showInfo("Build props " + status + " for future " + tile.label + " clones.")
+            } catch (error: Throwable) {
+                Log.e(TRACE_TAG, "build_props_template_save failed package=" + tile.packageName, error)
+                showError(error.message?.takeIf(String::isNotBlank) ?: "Couldn't save build props.", null)
             }
         }
     }
@@ -854,8 +902,11 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 refreshApps()
-                showInfo("Created $copiesToCreate ${tile.label} ${if (copiesToCreate == 1) "copy" else "copies"}. Installing a separate app icon for each copy…")
-                installCreatedLaunchers(tile.packageName, createdUserIds)
+                showInfo(
+                    "Created $copiesToCreate ${tile.label} ${if (copiesToCreate == 1) "copy" else "copies"}. " +
+                        "Confirm each Home screen prompt to add its icon with the original app name and icon."
+                )
+                queueHomeShortcutsForCopies(tile, createdUserIds)
             } catch (error: Throwable) {
                 val detail = error.message?.takeIf(String::isNotBlank)
                 showError(
@@ -926,7 +977,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
-private fun ClonyHome(
+private fun ClonyHomeRedesigned(
     apps: List<AppTile>,
     message: String?,
     messageIsError: Boolean,
@@ -938,456 +989,594 @@ private fun ClonyHome(
     onRefresh: () -> Unit,
     onOpenClone: (AppTile) -> Unit,
     onCreateCopies: (AppTile, List<String>, CloneBuildProps) -> Unit,
+    onSaveBuildPropsTemplate: (AppTile, CloneBuildProps) -> Unit,
     onPinClone: (AppTile) -> Unit,
-    onInstallLauncher: (AppTile) -> Unit,
-    onFingerprintSettings: (AppTile, String?) -> Unit,
-    onDeviceModelSettings: (AppTile, String?) -> Unit,
     onDeleteClone: (AppTile) -> Unit
 ) {
-    var isPickerOpen by remember { mutableStateOf(false) }
-    var pickerQuery by remember { mutableStateOf("") }
-    var copySelectionApp by remember { mutableStateOf<AppTile?>(null) }
-    var deleteSelectionApp by remember { mutableStateOf<AppTile?>(null) }
-    var networkSelectionApp by remember { mutableStateOf<AppTile?>(null) }
-    var fingerprintSelectionApp by remember { mutableStateOf<AppTile?>(null) }
-    var deviceModelSelectionApp by remember { mutableStateOf<AppTile?>(null) }
-    var buildPropsDraft by remember { mutableStateOf(CloneBuildProps()) }
-    var showBuildPropsDialog by remember { mutableStateOf(false) }
-    var requestedCopyCount by remember { mutableStateOf(1) }
-    var packageNamesDraft by remember { mutableStateOf(emptyList<String>()) }
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val occupiedPackageNames = remember(apps) {
-        apps.flatMap { listOfNotNull(it.packageName, it.customPackageName) }.toSet()
+    var selectedTab by remember { mutableStateOf(0) }
+    var detailPackage by remember { mutableStateOf<String?>(null) }
+    var editingClone by remember { mutableStateOf<AppTile?>(null) }
+    var query by remember { mutableStateOf("") }
+    var countSheetApp by remember { mutableStateOf<AppTile?>(null) }
+    var deleteApp by remember { mutableStateOf<AppTile?>(null) }
+    var networkApp by remember { mutableStateOf<AppTile?>(null) }
+    var proxyPickerSource by remember { mutableStateOf<AppTile?>(null) }
+    var showBuildProps by remember { mutableStateOf(false) }
+    var cloneCount by remember { mutableStateOf(1) }
+    var packageNames by remember { mutableStateOf(emptyList<String>()) }
+    var buildProps by remember { mutableStateOf(CloneBuildProps()) }
+    val context = LocalContext.current
+    val systemApps = remember(apps) {
+        apps.groupBy { it.packageName }.values.map { copies ->
+            copies.first().copy(
+                virtualUserId = null, copyNumber = null,
+                copyCount = copies.count { it.isCloned }, customPackageName = null
+            )
+        }.sortedBy { it.label.lowercase(Locale.ROOT) }
     }
-    val clonedApps = remember(apps) {
-        apps.filter { it.isCloned }
-            .sortedWith(compareBy<AppTile> { it.label.lowercase() }.thenBy { it.copyNumber })
+    val clones = remember(apps) {
+        apps.filter { it.isCloned }.sortedWith(compareBy<AppTile> { it.label.lowercase() }.thenBy { it.copyNumber })
     }
-    val pickerApps = remember(apps, pickerQuery) {
-        val sources = apps.groupBy { it.packageName }.values.map { copies ->
-            val app = copies.first()
-            app.copy(
-                virtualUserId = null,
-                copyNumber = null,
-                copyCount = copies.count { it.isCloned },
-                customPackageName = null
+    val occupiedNames = remember(apps) { apps.flatMap { listOfNotNull(it.packageName, it.customPackageName) }.toSet() }
+    val detailApp = systemApps.firstOrNull { it.packageName == detailPackage }
+    val detailClones = detailApp?.let { app -> clones.filter { it.packageName == app.packageName } }.orEmpty()
+    val matchingApps = remember(systemApps, query) {
+        if (query.isBlank()) systemApps else systemApps.filter {
+            it.label.contains(query, true) || it.packageName.contains(query, true)
+        }
+    }
+    val namesForRequest = packageNames.take(cloneCount).map(String::trim)
+    val requestValid = detailApp != null &&
+        cloneCount in 1..(MAX_COPIES_PER_APP - (detailApp?.copyCount ?: 0)) &&
+        namesForRequest.size == cloneCount &&
+        namesForRequest.all(ClonePackageNameStore::isValid) &&
+        namesForRequest.distinct().size == namesForRequest.size &&
+        namesForRequest.none(occupiedNames::contains)
+    var previousCopyCount by remember(detailPackage) { mutableStateOf<Int?>(null) }
+
+    androidx.compose.runtime.LaunchedEffect(detailPackage, detailApp?.copyCount) {
+        val currentCount = detailApp?.copyCount ?: return@LaunchedEffect
+        val previousCount = previousCopyCount
+        if (previousCount != null && currentCount > previousCount) {
+            cloneCount = 1
+            packageNames = packageNameDrafts(
+                detailApp,
+                1,
+                occupiedNames,
+                CloneCopyNameStore.nextNumber(context, detailApp.packageName)
             )
         }
-        val matches = if (pickerQuery.isBlank()) sources else sources.filter {
-            it.label.contains(pickerQuery, ignoreCase = true) ||
-                it.packageName.contains(pickerQuery, ignoreCase = true)
-        }
-        matches.sortedBy { it.label.lowercase() }
+        previousCopyCount = currentCount
+    }
+
+    androidx.activity.compose.BackHandler(enabled = detailPackage != null) {
+        detailPackage = null
+        editingClone = null
+    }
+
+    fun openSystemApp(app: AppTile, cloneToEdit: AppTile? = null) {
+        detailPackage = app.packageName
+        editingClone = cloneToEdit
+        cloneCount = 1
+        packageNames = packageNameDrafts(
+            app, 1, occupiedNames, CloneCopyNameStore.nextNumber(context, app.packageName)
+        )
+        buildProps = CloneBuildProps.fromValues(CloneBuildPropsStore.readTemplate(context, app.packageName))
     }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = {
-                    pickerQuery = ""
-                    isPickerOpen = true
-                },
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary
-            ) {
-                Text("+", style = MaterialTheme.typography.headlineMedium)
-            }
-        }
-    ) { innerPadding ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(innerPadding),
-            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 104.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp)
-        ) {
-            item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier.size(42.dp).clip(RoundedCornerShape(14.dp))
-                            .background(MaterialTheme.colorScheme.primary),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("C", color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Black)
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("CLONY", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
-                        Text("Local app clones", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    TextButton(onClick = onRefresh) { Text("Refresh") }
-                }
-            }
-
-            if (message != null) {
-                item {
-                    Card(
-                        shape = RoundedCornerShape(18.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (messageIsError) MaterialTheme.colorScheme.errorContainer
-                            else MaterialTheme.colorScheme.secondaryContainer
-                        )
-                    ) {
-                        Column(
-                            modifier = Modifier.fillMaxWidth().padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                if (busyPackageName != null) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(20.dp),
-                                        strokeWidth = 2.dp,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                    Spacer(Modifier.width(12.dp))
-                                }
-                                Text(
-                                    message,
-                                    modifier = Modifier.weight(1f),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = if (messageIsError) MaterialTheme.colorScheme.onErrorContainer
-                                    else MaterialTheme.colorScheme.onSecondaryContainer
-                                )
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.End,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                if (messageIsError) {
-                                    TextButton(onClick = onCopyDiagnostics) { Text("Copy message") }
-                                }
-                                if (messageIsError && retryPackageName != null) {
-                                    TextButton(onClick = { onRetry(retryPackageName) }) { Text("Retry") }
-                                }
-                                if (busyPackageName == null) {
-                                    TextButton(onClick = onMessageDismissed) { Text("OK") }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Cloned apps", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                        Text("Separate copies with their own app data", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceVariant) {
-                        Text("${clonedApps.size}", modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp), style = MaterialTheme.typography.labelLarge)
-                    }
-                }
-            }
-
-            if (clonedApps.isEmpty()) {
-                item {
-                    Card(
-                        shape = RoundedCornerShape(24.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
-                    ) {
-                        Column(
-                            modifier = Modifier.fillMaxWidth().padding(22.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text("＋", style = MaterialTheme.typography.displaySmall, color = MaterialTheme.colorScheme.primary)
-                            Text("No local clones yet", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                if (apps.isEmpty()) "No launchable apps were found on this device."
-                                else "Choose an installed app to create its own copy in the virtual runtime.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Button(onClick = { isPickerOpen = true }, enabled = apps.isNotEmpty() && busyPackageName == null) {
-                                Text("Add an app")
-                            }
-                        }
-                    }
-                }
-            } else {
-                items(
-                    clonedApps.chunked(2),
-                    key = { row -> row.joinToString("|") { "${it.packageName}:${it.virtualUserId}" } }
-                ) { row ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        row.forEach { app ->
-                            AppGridTile(
-                                app = app,
-                                isBusy = busyPackageName == app.packageName,
-                                isEnabled = busyPackageName == null,
-                                modifier = Modifier.weight(1f),
-                                onClick = { onOpenClone(app) },
-                                onPin = { onPinClone(app) },
-                                onInstallLauncher = { onInstallLauncher(app) },
-                                onFingerprintSettings = { fingerprintSelectionApp = app },
-                                onDeviceModelSettings = { deviceModelSelectionApp = app },
-                                onDelete = { deleteSelectionApp = app },
-                                onNetworkSettings = { networkSelectionApp = app }
-                            )
-                        }
-                        if (row.size == 1) Spacer(Modifier.weight(1f))
-                    }
-                }
-            }
-
-
-        }
-    }
-
-    if (isPickerOpen) {
-        ModalBottomSheet(onDismissRequest = { isPickerOpen = false }) {
-            Column(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Create another copy", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    Text(
-                        "Each copy gets separate app data and its own Clony Copy app icon. You can create up to $MAX_COPIES_PER_APP copies.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                AppSearchField(value = pickerQuery, onValueChange = { pickerQuery = it })
-                if (pickerApps.isEmpty()) {
-                    Text(
-                        if (apps.isEmpty()) "No launchable apps were found on this device."
-                        else "No apps match “$pickerQuery”.",
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 20.dp),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxWidth().heightIn(max = 560.dp),
-                        contentPadding = PaddingValues(bottom = 28.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        items(pickerApps, key = { it.packageName }) { app ->
-                            AppRow(
-                                app = app,
-                                isBusy = busyPackageName == app.packageName,
-                                isEnabled = busyPackageName == null && app.copyCount < MAX_COPIES_PER_APP,
-                                onClick = {
-                                    isPickerOpen = false
-                                    requestedCopyCount = 1
-                                    showBuildPropsDialog = false
-                                    buildPropsDraft = CloneBuildProps.fromValues(
-                                        CloneBuildPropsStore.readTemplate(context, app.packageName)
-                                    )
-                                    packageNamesDraft = packageNameDrafts(
-                                        app,
-                                        1,
-                                        occupiedPackageNames,
-                                        CloneCopyNameStore.nextNumber(context, app.packageName)
-                                    )
-                                    copySelectionApp = app
-                                }
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    copySelectionApp?.let { app ->
-        val maxForSelection = (MAX_COPIES_PER_APP - app.copyCount).coerceAtLeast(1)
-        val normalizedPackageNames = packageNamesDraft.take(requestedCopyCount).map { it.trim() }
-        val duplicatePackageName = normalizedPackageNames.distinct().size != normalizedPackageNames.size
-        val packageNamesValid = normalizedPackageNames.size == requestedCopyCount &&
-            normalizedPackageNames.all(ClonePackageNameStore::isValid) &&
-            !duplicatePackageName && normalizedPackageNames.none(occupiedPackageNames::contains)
-        AlertDialog(
-            onDismissRequest = {
-                showBuildPropsDialog = false
-                copySelectionApp = null
-            },
-            title = { Text("Create copies of ${app.label}") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("${app.copyCount} copies exist. Each new copy gets its own app data.")
-                    Row(
+        bottomBar = {
+            if (detailApp == null) {
+                Box(
+                    modifier = Modifier.fillMaxWidth().navigationBarsPadding()
+                        .padding(horizontal = 24.dp, vertical = 10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Surface(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
+                        shape = RoundedCornerShape(30.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        tonalElevation = 3.dp,
+                        shadowElevation = 8.dp
                     ) {
-                        OutlinedButton(
-                            onClick = {
-                                val nextCount = (requestedCopyCount - 1).coerceAtLeast(1)
-                                requestedCopyCount = nextCount
-                                packageNamesDraft = packageNameDrafts(
-                                    app, nextCount, occupiedPackageNames,
-                                    CloneCopyNameStore.nextNumber(context, app.packageName),
-                                    packageNamesDraft
-                                )
-                            },
-                            enabled = requestedCopyCount > 1
-                        ) { Text("−") }
-                        Text(
-                            "$requestedCopyCount",
-                            modifier = Modifier.padding(horizontal = 24.dp),
-                            style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-                        OutlinedButton(
-                            onClick = {
-                                val nextCount = (requestedCopyCount + 1).coerceAtMost(maxForSelection)
-                                requestedCopyCount = nextCount
-                                packageNamesDraft = packageNameDrafts(
-                                    app, nextCount, occupiedPackageNames,
-                                    CloneCopyNameStore.nextNumber(context, app.packageName),
-                                    packageNamesDraft
-                                )
-                            },
-                            enabled = requestedCopyCount < maxForSelection
-                        ) { Text("+") }
+                        Row(
+                            Modifier.fillMaxWidth().padding(5.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            HomeBottomTab("Cloned apps", selectedTab == 0, Modifier.weight(1f), false) {
+                                selectedTab = 0
+                            }
+                            HomeBottomTab("System apps", selectedTab == 1, Modifier.weight(1f), true) {
+                                selectedTab = 1
+                            }
+                        }
                     }
-                    Column(
-                        modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp)
-                            .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                }
+            }
+        },
+        floatingActionButton = {
+            if (detailApp != null) {
+                FloatingActionButton(
+                    onClick = {
+                        if (requestValid && busyPackageName == null) {
+                            onCreateCopies(detailApp, namesForRequest, buildProps)
+                        }
+                    },
+                    containerColor = if (requestValid && busyPackageName == null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = if (requestValid && busyPackageName == null) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 18.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        Text("+", style = MaterialTheme.typography.titleLarge)
+                        Text("Clone", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    ) { padding ->
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (detailApp == null) {
+                    Box(
+                        Modifier.size(42.dp).clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.primary),
+                        contentAlignment = Alignment.Center
+                    ) { Text("C", color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Black) }
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("CLONY", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                        Text("Private app copies", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                } else {
+                    TextButton(onClick = { detailPackage = null; editingClone = null }) { Text("← Back") }
+                    Image(detailApp.icon, null, Modifier.size(42.dp).clip(RoundedCornerShape(13.dp)))
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(detailApp.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(
-                            "These identifiers appear in Clony. Apps running inside each copy retain the source package identity.",
+                            editingClone?.let { "Editing " + it.displayName } ?: "System app",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        repeat(requestedCopyCount) { index ->
-                            val value = packageNamesDraft.getOrElse(index) { "" }
-                            val normalizedValue = value.trim()
-                            val isDuplicate = normalizedValue.isNotEmpty() &&
-                                normalizedPackageNames.count { it == normalizedValue } > 1
-                            val isAlreadyUsed = normalizedValue in occupiedPackageNames
-                            val isInvalid = !ClonePackageNameStore.isValid(normalizedValue)
-                            val errorMessage = when {
-                                isInvalid -> "Use a dotted package name, such as com.example.app.clone1."
-                                isDuplicate -> "Each copy needs a different package name."
-                                isAlreadyUsed -> "This package name is already in use."
-                                else -> null
+                    }
+                }
+                TextButton(onClick = onRefresh) { Text("Refresh") }
+            }
+
+            if (detailApp != null) {
+                LazyColumn(
+                    Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 104.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    if (message != null) item {
+                        HomeMessageCard(message, messageIsError, busyPackageName != null, retryPackageName, onCopyDiagnostics, onRetry, onMessageDismissed)
+                    }
+                    item { Text("Clone settings", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
+                    item {
+                        DetailActionCard(
+                            title = "Number of clones",
+                            description = when {
+                                detailApp.copyCount >= MAX_COPIES_PER_APP -> "Maximum of ${MAX_COPIES_PER_APP} clones reached"
+                                detailApp.copyCount == 0 -> "No copies yet · tap to choose how many to add"
+                                else -> "${detailApp.copyCount} existing · tap to choose how many to add"
+                            },
+                            value = detailApp.copyCount.toString(),
+                            enabled = detailApp.copyCount < MAX_COPIES_PER_APP
+                        ) { countSheetApp = detailApp }
+                    }
+                    item {
+                        DetailActionCard(
+                            "Build props",
+                            if (buildProps.overrideCount == 0) "Clony defaults will be used"
+                            else "${buildProps.overrideCount} custom values for new copies",
+                            "Edit"
+                        ) { showBuildProps = true }
+                    }
+                    item {
+                        DetailActionCard(
+                            title = "Proxy / network",
+                            description = editingClone?.let { "Configure the connection for " + it.displayName } ?: when (detailClones.size) {
+                                0 -> "Create a clone to configure its connection"
+                                1 -> "Configure the connection for 1 clone"
+                                else -> "Configure the connection for " + detailClones.size + " clones"
+                            },
+                            value = if (editingClone != null || detailClones.size == 1) "Edit" else detailClones.size.toString(),
+                            enabled = editingClone != null || detailClones.isNotEmpty()
+                        ) {
+                            when {
+                                editingClone != null -> networkApp = editingClone
+                                detailClones.size == 1 -> networkApp = detailClones.first()
+                                detailClones.size > 1 -> proxyPickerSource = detailApp
                             }
-                            OutlinedTextField(
-                                value = value,
-                                onValueChange = { updatedValue ->
-                                    packageNamesDraft = packageNamesDraft.toMutableList().also {
-                                        if (index < it.size) it[index] = updatedValue
+                        }
+                    }
+                    item { Text(detailApp.packageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                }
+            } else {
+                if (selectedTab == 0) {
+                    LazyColumn(
+                        Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 24.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        if (message != null) item {
+                            HomeMessageCard(message, messageIsError, busyPackageName != null, retryPackageName, onCopyDiagnostics, onRetry, onMessageDismissed)
+                        }
+                        item {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Your clones", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                                    Text("Each copy keeps its own app data", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceVariant) {
+                                    Text("${clones.size}", Modifier.padding(horizontal = 14.dp, vertical = 8.dp), style = MaterialTheme.typography.labelLarge)
+                                }
+                            }
+                        }
+                        if (clones.isEmpty()) {
+                            item {
+                                Card(shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
+                                    Column(
+                                        Modifier.fillMaxWidth().padding(24.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Text("＋", style = MaterialTheme.typography.displaySmall, color = MaterialTheme.colorScheme.primary)
+                                        Text("No clones yet", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                                        Text("Open System apps to choose an app and create its first copy.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Button(onClick = { selectedTab = 1 }, enabled = systemApps.isNotEmpty()) { Text("Browse system apps") }
                                     }
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Copy ${index + 1} package name") },
-                                singleLine = true,
-                                isError = errorMessage != null,
-                                supportingText = if (errorMessage != null) {
-                                    { Text(errorMessage) }
-                                } else null
+                                }
+                            }
+                        } else {
+                            items(clones.chunked(2), key = { row -> row.joinToString("|") { "${it.packageName}:${it.virtualUserId}" } }) { row ->
+                                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    row.forEach { app ->
+                                        AppGridTile(
+                                            app, busyPackageName == app.packageName, busyPackageName == null,
+                                            Modifier.weight(1f),
+                                            onClick = { onOpenClone(app) },
+                                            onEditClone = {
+                                                systemApps.firstOrNull { it.packageName == app.packageName }
+                                                    ?.let { openSystemApp(it, app) }
+                                            },
+                                            onPin = { onPinClone(app) },
+                                            onDelete = { deleteApp = app }
+                                        )
+                                    }
+                                    if (row.size == 1) Spacer(Modifier.weight(1f))
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Column(Modifier.fillMaxSize()) {
+                        AppSearchField(query, { query = it }, Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
+                        LazyColumn(
+                            Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 24.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            if (message != null) item {
+                                HomeMessageCard(message, messageIsError, busyPackageName != null, retryPackageName, onCopyDiagnostics, onRetry, onMessageDismissed)
+                            }
+                            item { Text("Installed apps · ${systemApps.size}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
+                            if (matchingApps.isEmpty()) {
+                                item {
+                                    Text(
+                                        if (systemApps.isEmpty()) "No launchable apps were found on this device."
+                                        else "No apps match “$query”.",
+                                        Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            } else items(matchingApps, key = { it.packageName }) { app ->
+                                SystemAppRow(app, busyPackageName == app.packageName) { openSystemApp(app) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    countSheetApp?.let { app ->
+        CloneCountSheet(
+            app, cloneCount, packageNames, occupiedNames,
+            CloneCopyNameStore.nextNumber(context, app.packageName),
+            onDismiss = { countSheetApp = null },
+            onApply = { count, names -> cloneCount = count; packageNames = names; countSheetApp = null }
+        )
+    }
+    if (showBuildProps && detailApp != null) {
+        CloneBuildPropsDialog(
+            detailApp.label, buildProps,
+            onDismiss = { showBuildProps = false },
+            onSave = { props -> buildProps = props; showBuildProps = false; onSaveBuildPropsTemplate(detailApp, props) }
+        )
+    }
+    deleteApp?.let { app ->
+        AlertDialog(
+            onDismissRequest = { deleteApp = null },
+            title = { Text("Delete ${app.displayName}?") },
+            text = {
+                Text(
+                    "This permanently removes the copy and its app data. Clony disables its pinned Home screen shortcut. " +
+                        "If this copy has a separate launcher app icon, Android will ask whether to uninstall it."
+                )
+            },
+            confirmButton = { TextButton(onClick = { onDeleteClone(app); deleteApp = null }) { Text("Delete Clone", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = { deleteApp = null }) { Text("Cancel") } }
+        )
+    }
+    proxyPickerSource?.let { app ->
+        CloneProxyPickerSheet(
+            sourceApp = app,
+            clones = detailClones,
+            onDismiss = { proxyPickerSource = null },
+            onSelect = { selectedClone ->
+                proxyPickerSource = null
+                networkApp = selectedClone
+            }
+        )
+    }
+    networkApp?.let { app ->
+        CloneProxyDialog(
+            app,
+            onDismiss = { networkApp = null },
+            onSaved = { networkApp = null; onRefresh() }
+        )
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun CloneProxyPickerSheet(
+    sourceApp: AppTile,
+    clones: List<AppTile>,
+    onDismiss: () -> Unit,
+    onSelect: (AppTile) -> Unit
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text("Choose a clone", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text(
+                "Proxy settings are saved separately for each " + sourceApp.label + " clone.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            clones.forEach { clone ->
+                Card(
+                    onClick = { onSelect(clone) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(18.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Image(clone.icon, null, Modifier.size(42.dp).clip(RoundedCornerShape(13.dp)))
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(clone.displayName, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                clone.customPackageName ?: clone.packageName,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
-                    Text("Up to $MAX_COPIES_PER_APP copies per app.", style = MaterialTheme.typography.bodySmall)
-                    OutlinedButton(
-                        onClick = { showBuildPropsDialog = true },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Build props · ${buildPropsDraft.overrideCount} overrides")
-                    }
                 }
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = packageNamesValid,
-                    onClick = {
-                        onCreateCopies(app, normalizedPackageNames, buildPropsDraft)
-                        showBuildPropsDialog = false
-                        copySelectionApp = null
-                    }
-                ) { Text("Create $requestedCopyCount") }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    showBuildPropsDialog = false
-                    copySelectionApp = null
-                }) { Text("Cancel") }
             }
+            Spacer(Modifier.size(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun HomeBottomTab(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    systemApps: Boolean,
+    onClick: () -> Unit
+) {
+    val glyphColor = if (selected) MaterialTheme.colorScheme.onSecondaryContainer
+    else MaterialTheme.colorScheme.onSurfaceVariant
+    Card(
+        onClick = onClick,
+        modifier = modifier.heightIn(min = 58.dp),
+        shape = RoundedCornerShape(26.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer
+            else MaterialTheme.colorScheme.surfaceContainerHigh
         )
-        if (showBuildPropsDialog) {
-            CloneBuildPropsDialog(
-                appLabel = app.label,
-                initialProps = buildPropsDraft,
-                onDismiss = { showBuildPropsDialog = false },
-                onSave = {
-                    buildPropsDraft = it
-                    showBuildPropsDialog = false
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(vertical = 7.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Canvas(Modifier.size(20.dp)) {
+                val stroke = Stroke(width = 1.8.dp.toPx())
+                val corner = CornerRadius(3.dp.toPx(), 3.dp.toPx())
+                if (systemApps) {
+                    val cell = 6.dp.toPx()
+                    val gap = 3.dp.toPx()
+                    val start = (size.width - cell * 2 - gap) / 2
+                    for (row in 0..1) {
+                        for (column in 0..1) {
+                            drawRoundRect(
+                                color = glyphColor,
+                                topLeft = Offset(start + column * (cell + gap), start + row * (cell + gap)),
+                                size = Size(cell, cell),
+                                cornerRadius = corner
+                            )
+                        }
+                    }
+                } else {
+                    drawRoundRect(
+                        color = glyphColor,
+                        topLeft = Offset(size.width * 0.30f, size.height * 0.10f),
+                        size = Size(size.width * 0.58f, size.height * 0.68f),
+                        cornerRadius = corner,
+                        style = stroke
+                    )
+                    drawRoundRect(
+                        color = glyphColor,
+                        topLeft = Offset(size.width * 0.12f, size.height * 0.30f),
+                        size = Size(size.width * 0.58f, size.height * 0.68f),
+                        cornerRadius = corner,
+                        style = stroke
+                    )
                 }
+            }
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                color = glyphColor,
+                maxLines = 1
             )
         }
     }
+}
 
-    deleteSelectionApp?.let { app ->
-        AlertDialog(
-            onDismissRequest = { deleteSelectionApp = null },
-            title = { Text("Delete ${app.displayName}?") },
-            text = {
-                Text("This permanently removes the copy and its app data. Clony disables its pinned home screen shortcut. Android will ask whether to uninstall its separate app icon.")
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        onDeleteClone(app)
-                        deleteSelectionApp = null
-                    }
-                ) {
-                    Text("Delete copy", color = MaterialTheme.colorScheme.error)
+@Composable
+private fun HomeMessageCard(
+    message: String, isError: Boolean, isBusy: Boolean, retryPackageName: String?,
+    onCopy: () -> Unit, onRetry: (String) -> Unit, onDismiss: () -> Unit
+) {
+    Card(
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = if (isError) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer)
+    ) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (isBusy) { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(12.dp)) }
+                Text(message, Modifier.weight(1f), color = if (isError) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSecondaryContainer)
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                if (isError) TextButton(onClick = onCopy) { Text("Copy message") }
+                if (isError && retryPackageName != null) TextButton(onClick = { onRetry(retryPackageName) }) { Text("Retry") }
+                if (!isBusy) TextButton(onClick = onDismiss) { Text("OK") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DetailActionCard(title: String, description: String, value: String, enabled: Boolean = true, onClick: () -> Unit) {
+    Card(
+        onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
+    ) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
+                Text(value, Modifier.padding(horizontal = 14.dp, vertical = 9.dp), fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SystemAppRow(app: AppTile, isBusy: Boolean, onClick: () -> Unit) {
+    Card(
+        onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
+    ) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Image(app.icon, null, Modifier.size(48.dp).clip(RoundedCornerShape(14.dp)))
+            Spacer(Modifier.width(13.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(app.label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    when { isBusy -> "Creating copy…"; app.copyCount == 0 -> "No clones yet"; app.copyCount == 1 -> "1 clone"; else -> "${app.copyCount} clones" },
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Text("›", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun CloneCountSheet(
+    app: AppTile, initialCount: Int, initialNames: List<String>, occupiedNames: Set<String>,
+    firstCopyNumber: Int, onDismiss: () -> Unit, onApply: (Int, List<String>) -> Unit
+) {
+    var count by remember(app.packageName, initialCount) { mutableStateOf(initialCount.coerceAtLeast(1)) }
+    var names by remember(app.packageName, initialCount, initialNames) {
+        mutableStateOf(packageNameDrafts(app, initialCount, occupiedNames, firstCopyNumber, initialNames))
+    }
+    val maxCount = (MAX_COPIES_PER_APP - app.copyCount).coerceAtLeast(0)
+    val normalized = names.take(count).map(String::trim)
+    val valid = count in 1..maxCount && normalized.size == count &&
+        normalized.all(ClonePackageNameStore::isValid) && normalized.distinct().size == count &&
+        normalized.none(occupiedNames::contains)
+
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            Modifier.fillMaxWidth().heightIn(max = 680.dp).verticalScroll(rememberScrollState()).padding(horizontal = 22.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text("Number of clones", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("${app.copyCount} existing · up to ${maxCount} more for ${app.label}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(onClick = {
+                    val next = (count - 1).coerceAtLeast(1)
+                    names = packageNameDrafts(app, next, occupiedNames, firstCopyNumber, names); count = next
+                }, enabled = count > 1) { Text("−") }
+                Text(count.toString(), Modifier.padding(horizontal = 28.dp), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                OutlinedButton(onClick = {
+                    val next = (count + 1).coerceAtMost(maxCount.coerceAtLeast(1))
+                    names = packageNameDrafts(app, next, occupiedNames, firstCopyNumber, names); count = next
+                }, enabled = count < maxCount) { Text("+") }
+            }
+            Text("Copy identifiers", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            repeat(count) { index ->
+                val value = names.getOrElse(index) { "" }
+                val id = value.trim()
+                val duplicate = id.isNotEmpty() && normalized.count { it == id } > 1
+                val error = when {
+                    !ClonePackageNameStore.isValid(id) -> "Enter a valid dotted package name."
+                    duplicate -> "Each clone needs a different name."
+                    id in occupiedNames -> "This package name is already in use."
+                    else -> null
                 }
-            },
-            dismissButton = {
-                TextButton(onClick = { deleteSelectionApp = null }) { Text("Cancel") }
+                OutlinedTextField(
+                    value, { updated -> names = names.toMutableList().also { if (index < it.size) it[index] = updated } },
+                    modifier = Modifier.fillMaxWidth(), label = { Text("Clone ${index + 1} package name") },
+                    singleLine = true, isError = error != null,
+                    supportingText = if (error != null) ({ Text(error) }) else null
+                )
             }
-        )
-    }
-
-    networkSelectionApp?.let { app ->
-        CloneProxyDialog(
-            app = app,
-            onDismiss = { networkSelectionApp = null },
-            onSaved = {
-                networkSelectionApp = null
-                onRefresh()
+            Row(Modifier.fillMaxWidth().padding(bottom = 24.dp), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+                Spacer(Modifier.width(8.dp))
+                Button(onClick = { onApply(count, normalized) }, enabled = valid) { Text("Done") }
             }
-        )
-    }
-
-    fingerprintSelectionApp?.let { app ->
-        val userId = app.virtualUserId
-        val context = androidx.compose.ui.platform.LocalContext.current
-        val currentFingerprint = remember(app.packageName, userId) {
-            userId?.let { CloneFingerprintStore.read(context, app.packageName, it) }
         }
-        CloneFingerprintDialog(
-            app = app,
-            currentFingerprint = currentFingerprint,
-            onDismiss = { fingerprintSelectionApp = null },
-            onSave = { fingerprint ->
-                fingerprintSelectionApp = null
-                onFingerprintSettings(app, fingerprint)
-            }
-        )
-    }
-
-    deviceModelSelectionApp?.let { app ->
-        val userId = app.virtualUserId
-        val context = androidx.compose.ui.platform.LocalContext.current
-        val currentModel = remember(app.packageName, userId) {
-            userId?.let { CloneDeviceModelStore.read(context, app.packageName, it) }
-        }
-        CloneDeviceModelDialog(
-            app = app,
-            currentModel = currentModel,
-            onDismiss = { deviceModelSelectionApp = null },
-            onSave = { model ->
-                deviceModelSelectionApp = null
-                onDeviceModelSettings(app, model)
-            }
-        )
     }
 }
 
@@ -1398,13 +1587,12 @@ private fun AppGridTile(
     isEnabled: Boolean,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
+    onEditClone: () -> Unit,
     onPin: () -> Unit,
-    onInstallLauncher: () -> Unit,
-    onFingerprintSettings: () -> Unit,
-    onDeviceModelSettings: () -> Unit,
-    onDelete: () -> Unit,
-    onNetworkSettings: () -> Unit
+    onDelete: () -> Unit
 ) {
+    val context = LocalContext.current
+    val displayedPackageName = app.customPackageName ?: app.packageName
     var actionsExpanded by remember(app.packageName, app.virtualUserId) { mutableStateOf(false) }
     Card(
         onClick = onClick,
@@ -1428,47 +1616,21 @@ private fun AppGridTile(
                 onDismissRequest = { actionsExpanded = false }
             ) {
                 DropdownMenuItem(
-                    text = { Text("Proxy / network") },
+                    text = { Text("Edit Clone") },
                     onClick = {
                         actionsExpanded = false
-                        onNetworkSettings()
+                        onEditClone()
                     }
                 )
                 DropdownMenuItem(
-                    text = { Text("Device fingerprint") },
-                    onClick = {
-                        actionsExpanded = false
-                        onFingerprintSettings()
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Phone model") },
-                    onClick = {
-                        actionsExpanded = false
-                        onDeviceModelSettings()
-                    }
-                )
-                if (app.launcherPackage != null) {
-                    DropdownMenuItem(
-                        text = {
-                            Text(if (app.launcherInstalled) "Copy app icon installed" else "Install launcher")
-                        },
-                        enabled = !app.launcherInstalled,
-                        onClick = {
-                            actionsExpanded = false
-                            onInstallLauncher()
-                        }
-                    )
-                }
-                DropdownMenuItem(
-                    text = { Text("Add copy icon to Home screen") },
+                    text = { Text("Add icon to home screen") },
                     onClick = {
                         actionsExpanded = false
                         onPin()
                     }
                 )
                 DropdownMenuItem(
-                    text = { Text("Delete copy", color = MaterialTheme.colorScheme.error) },
+                    text = { Text("Delete Clone", color = MaterialTheme.colorScheme.error) },
                     onClick = {
                         actionsExpanded = false
                         onDelete()
@@ -1499,11 +1661,19 @@ private fun AppGridTile(
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                app.customPackageName ?: app.packageName,
+                displayedPackageName,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                modifier = Modifier.combinedClickable(
+                    onClick = {},
+                    onLongClickLabel = "Copy package name",
+                    onLongClick = {
+                        context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(
+                            ClipData.newPlainText("Package name", displayedPackageName)
+                        )
+                        Toast.makeText(context, "Package name copied", Toast.LENGTH_SHORT).show()
+                    }
+                )
             )
         }
         }
@@ -1511,9 +1681,9 @@ private fun AppGridTile(
 }
 
 @Composable
-private fun AppSearchField(value: String, onValueChange: (String) -> Unit) {
+private fun AppSearchField(value: String, onValueChange: (String) -> Unit, modifier: Modifier = Modifier) {
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLow
     ) {
@@ -1536,61 +1706,6 @@ private fun AppSearchField(value: String, onValueChange: (String) -> Unit) {
                     }
                 }
             )
-        }
-    }
-}
-
-@Composable
-private fun AppRow(app: AppTile, isBusy: Boolean, isEnabled: Boolean, onClick: () -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Image(
-                bitmap = app.icon,
-                contentDescription = null,
-                modifier = Modifier.size(48.dp).clip(RoundedCornerShape(14.dp))
-            )
-            Spacer(Modifier.width(13.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(app.label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(
-                    when {
-                        app.copyCount > 0 -> "${app.copyCount} copies · separate data"
-                        app.hasSplitApks -> "Split APKs · support may vary"
-                        else -> "Installed on this device"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            Spacer(Modifier.width(10.dp))
-            OutlinedButton(
-                onClick = onClick,
-                enabled = isEnabled,
-                contentPadding = PaddingValues(horizontal = 13.dp, vertical = 9.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.primary)
-            ) {
-                if (isBusy) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(8.dp))
-                }
-                Text(
-                    when {
-                        isBusy -> "Working"
-                        app.copyCount >= MAX_COPIES_PER_APP -> "Max copies"
-                        app.copyCount > 0 -> "Add copies"
-                        else -> "Clone"
-                    }
-                )
-            }
         }
     }
 }

@@ -270,13 +270,26 @@ internal object CloneShortcutMigration {
                 putExtra(EXTRA_CLONE_PACKAGE, packageName)
                 putExtra(EXTRA_CLONE_USER_ID, userId)
             }
-            val shortLabel = shortcut.shortLabel?.toString()
-                ?.takeIf(String::isNotBlank) ?: packageName.take(25)
+            val sourceLabel = runCatching {
+                val sourceInfo = context.packageManager.getApplicationInfo(packageName, 0)
+                context.packageManager.getApplicationLabel(sourceInfo).toString()
+            }.getOrNull()?.takeIf(String::isNotBlank)
+            val copyNumber = CloneCopyNameStore.assign(
+                context,
+                packageName,
+                userId,
+                ClonePackageNameStore.read(context, packageName, userId)
+            )
+            val shortcutLabel = sourceLabel
+                ?: shortcut.longLabel?.toString()?.takeIf(String::isNotBlank)
+                ?: shortcut.shortLabel?.toString()?.takeIf(String::isNotBlank)
+                ?: packageName
+            val copyShortcutLabel = "$shortcutLabel $copyNumber"
             val builder = ShortcutInfoCompat.Builder(context, shortcut.id)
-                .setShortLabel(shortLabel)
+                .setShortLabel(copyShortcutLabel.take(25))
+                .setLongLabel(copyShortcutLabel)
                 .setActivity(ComponentName(context, CloneShortcutActivity::class.java))
                 .setIntent(newIntent)
-            shortcut.longLabel?.let(builder::setLongLabel)
             shortcut.icon?.let(builder::setIcon)
             builder.build()
         }

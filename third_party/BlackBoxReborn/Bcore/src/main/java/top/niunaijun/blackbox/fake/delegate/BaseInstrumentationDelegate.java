@@ -37,7 +37,6 @@ public class BaseInstrumentationDelegate extends Instrumentation {
 
     protected Instrumentation mBaseInstrumentation;
 
-
     @Override
     public void onCreate(Bundle arguments) {
         mBaseInstrumentation.onCreate(arguments);

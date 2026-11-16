@@ -5,18 +5,17 @@ runtime. Each clone is installed into its own virtual user and starts with
 separate app data; it does not copy the original app's private data. Cloning
 and launching happen on the device without a cloning backend.
 
-Each clone can also have a separately installed **Clony Copy N** launcher app
-in Android's app drawer. That small companion package contains only a launcher
-stub; it opens the assigned virtual copy through Clony. The original app is
-still running inside BlackBox, so the companion app does not create a separate
-Android security sandbox or change the guest app's package identity. Android
-will ask to allow installs from Clony and confirm launcher installation.
+Copies keep the source app's icon and use numbered names such as **TikTok 1**
+and **TikTok 2** in Clony and on the Android home screen. Each shortcut opens
+its assigned copy through Clony. The original app is still running inside
+BlackBox, so the shortcut does not create a separate Android security sandbox
+or change the guest app's package identity.
 
 ## Current limits
 
-- Clony supports up to 10 virtual copies per source app and up to 100 distinct
-  companion launcher packages. Per-copy label/icon editing and WhatsApp Web
-  actions are not implemented.
+- Clony supports up to 10 virtual copies per source app. Home-screen shortcuts
+  use the source app's icon and a numbered name. Older copies may still have
+  the generic companion launcher installed by previous versions.
 - The runtime imports the installed base APK and split APKs. App compatibility
   still depends on the package format and the runtime's Android API support.
 - App compatibility depends on the runtime's Android API and app-specific
@@ -34,10 +33,11 @@ will ask to allow installs from Clony and confirm launcher installation.
 
 ## Build
 
-Build the debug APK with `./gradlew :app:assembleDebug`. The build generates
-100 signed launcher packages using the machine's Android debug keystore. The
-vendored runtime uses Android NDK `28.2.13676358`; Gradle resolves its Android
-and annotation processor dependencies through Google Maven and Maven Central.
+Build the debug APK with `./gradlew :app:assembleDebug`. The build keeps the
+signed launcher packages used by copies created with older Clony versions.
+New copies use Android home-screen shortcuts. The vendored runtime uses Android
+NDK `28.2.13676358`; Gradle resolves its Android and annotation processor
+dependencies through Google Maven and Maven Central.
 
 See [third-party notices](THIRD_PARTY_NOTICES.md) for licensing and runtime
 modifications.

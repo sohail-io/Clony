@@ -40,6 +40,12 @@ internal object CloneLaunchers {
     }
 
     @Synchronized
+    fun existing(context: Context, packageName: String, userId: Int): String? {
+        val slot = read(context).assignments["$packageName:$userId"] ?: return null
+        return LauncherRegistry.packageName(slot)
+    }
+
+    @Synchronized
     fun remove(context: Context, packageName: String, userId: Int) {
         val registry = read(context)
         registry.remove("$packageName:$userId")

@@ -6,15 +6,19 @@ import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -161,6 +165,7 @@ internal data class CloneBuildProps(
 }
 
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 internal fun CloneBuildPropsDialog(
     appLabel: String,
     initialProps: CloneBuildProps,
@@ -180,12 +185,13 @@ internal fun CloneBuildPropsDialog(
         cloneBuildProfiles.filter { it.props.sdkInt.toIntOrNull() == targetSdkInt }
     }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Build props", fontWeight = FontWeight.SemiBold) },
-        text = {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier.fillMaxWidth().heightIn(max = 780.dp).padding(horizontal = 20.dp)
+        ) {
+            Text("Build props", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
             Column(
-                modifier = Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState()),
+                modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text("Build props you set override Clony's virtual values for $appLabel. Leave a field blank to keep Clony's default.")
@@ -285,14 +291,17 @@ internal fun CloneBuildPropsDialog(
                     )
                 }
             }
-        },
-        confirmButton = {
-            Button(onClick = { onSave(normalized) }, enabled = valid) { Text("Save") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+                Spacer(Modifier.width(8.dp))
+                Button(onClick = { onSave(normalized) }, enabled = valid) { Text("Save") }
+            }
         }
-    )
+    }
 
     if (showProfiles) {
         CloneBuildProfilePicker(
