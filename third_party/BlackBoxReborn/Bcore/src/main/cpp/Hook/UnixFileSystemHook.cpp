@@ -3,9 +3,36 @@
 
 
 #include <IO.h>
+#include "Log.h"
 #include "UnixFileSystemHook.h"
 #import "JniHook/JniHook.h"
 #include "BaseHook.h"
+#include <string>
+#include <string.h>
+
+static std::string profileCropPath(JNIEnv *env, jstring path) {
+    if (path == nullptr) return "<null>";
+    const char *chars = env->GetStringUTFChars(path, nullptr);
+    if (chars == nullptr) return "<unavailable>";
+    std::string result(chars);
+    env->ReleaseStringUTFChars(path, chars);
+    return result;
+}
+
+static bool isProfileCropPath(const std::string &path) {
+    return path.find("profileHeader") != std::string::npos ||
+           path.find("sd_can_write") != std::string::npos;
+}
+
+static std::string profileCropFilePath(JNIEnv *env, jobject file) {
+    if (file == nullptr) return "<null>";
+    jclass fileClass = env->GetObjectClass(file);
+    if (fileClass == nullptr) return "<unavailable>";
+    jmethodID getPath = env->GetMethodID(fileClass, "getPath", "()Ljava/lang/String;");
+    if (getPath == nullptr) return "<unavailable>";
+    jstring path = (jstring) env->CallObjectMethod(file, getPath);
+    return profileCropPath(env, path);
+}
 
 
 HOOK_JNI(jstring, canonicalize0, JNIEnv *env, jobject obj, jstring path) {
@@ -15,8 +42,15 @@ HOOK_JNI(jstring, canonicalize0, JNIEnv *env, jobject obj, jstring path) {
 
 
 HOOK_JNI(jint, getBooleanAttributes0, JNIEnv *env, jobject obj, jstring abspath) {
+    std::string requested = profileCropPath(env, abspath);
     jstring redirect = IO::redirectPath(env, abspath);
-    return orig_getBooleanAttributes0(env, obj, redirect);
+    std::string resolved = profileCropPath(env, redirect);
+    jint result = orig_getBooleanAttributes0(env, obj, redirect);
+    if (isProfileCropPath(requested) || isProfileCropPath(resolved)) {
+        ALOGD("profile-crop-fs getBooleanAttributes requested=%s resolved=%s result=0x%x exception=%d",
+              requested.c_str(), resolved.c_str(), result, env->ExceptionCheck());
+    }
+    return result;
 }
 
 
@@ -34,8 +68,15 @@ HOOK_JNI(jboolean, setPermission0, JNIEnv *env, jobject obj, jobject file, jint 
 
 
 HOOK_JNI(jboolean, createFileExclusively0, JNIEnv *env, jobject obj, jstring path) {
+    std::string requested = profileCropPath(env, path);
     jstring redirect = IO::redirectPath(env, path);
-    return orig_createFileExclusively0(env, obj, redirect);
+    std::string resolved = profileCropPath(env, redirect);
+    jboolean result = orig_createFileExclusively0(env, obj, redirect);
+    if (isProfileCropPath(requested) || isProfileCropPath(resolved)) {
+        ALOGD("profile-crop-fs createFileExclusively requested=%s resolved=%s result=%d exception=%d",
+              requested.c_str(), resolved.c_str(), result, env->ExceptionCheck());
+    }
+    return result;
 }
 
 
@@ -46,8 +87,15 @@ HOOK_JNI(jobjectArray, list0, JNIEnv *env, jobject obj, jobject file) {
 
 
 HOOK_JNI(jboolean, createDirectory0, JNIEnv *env, jobject obj, jobject path) {
+    std::string requested = profileCropFilePath(env, path);
     jobject redirect = IO::redirectPath(env, path);
-    return orig_createDirectory0(env, obj, redirect);
+    std::string resolved = profileCropFilePath(env, redirect);
+    jboolean result = orig_createDirectory0(env, obj, redirect);
+    if (isProfileCropPath(requested) || isProfileCropPath(resolved)) {
+        ALOGD("profile-crop-fs createDirectory requested=%s resolved=%s result=%d exception=%d",
+              requested.c_str(), resolved.c_str(), result, env->ExceptionCheck());
+    }
+    return result;
 }
 
 
@@ -102,6 +150,8 @@ void UnixFileSystemHook::init(JNIEnv *env) {
         JniHook::HookJniFun(env, className, "createFileExclusively0", "(Ljava/lang/String;)Z",
                             (void *) new_createFileExclusively0,
                             (void **) (&orig_createFileExclusively0), false);
+        ALOGD("profile-crop-fs hook method=createFileExclusively0 active=%d",
+              orig_createFileExclusively0 != nullptr);
     } catch (...) {
         ALOGD("UnixFileSystemHook: Failed to hook createFileExclusively0, continuing without it");
     }
@@ -116,6 +166,8 @@ void UnixFileSystemHook::init(JNIEnv *env) {
     try {
         JniHook::HookJniFun(env, className, "createDirectory0", "(Ljava/io/File;)Z",
                             (void *) new_createDirectory0, (void **) (&orig_createDirectory0), false);
+        ALOGD("profile-crop-fs hook method=createDirectory0 active=%d",
+              orig_createDirectory0 != nullptr);
     } catch (...) {
         ALOGD("UnixFileSystemHook: Failed to hook createDirectory0, continuing without it");
     }

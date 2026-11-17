@@ -1,6 +1,7 @@
 package top.niunaijun.blackbox.fake.service.libcore;
 
 import android.os.Process;
+import android.util.Log;
 
 import java.lang.reflect.Method;
 
@@ -43,20 +44,51 @@ public class OsStub extends ClassInvocationStub {
 
     @Override
     public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        String cropPath = null;
+        String redirectedCropPath = null;
         if (args != null) {
             for (int i = 0; i < args.length; i++) {
                 if (args[i] == null)
                     continue;
+                String original = null;
+                String redirected = null;
                 if (args[i] instanceof String && ((String) args[i]).startsWith("/")) {
-                    String orig = (String) args[i];
-                    args[i] = IOCore.get().redirectPath(orig);
-
-
-
+                    original = (String) args[i];
+                    redirected = IOCore.get().redirectPath(original);
+                    args[i] = redirected;
+                } else if (args[i] instanceof String) {
+                    original = (String) args[i];
+                    redirected = original;
+                }
+                if (isProfileCropPath(original) || isProfileCropPath(redirected)) {
+                    cropPath = original;
+                    redirectedCropPath = redirected;
                 }
             }
         }
-        return super.invoke(proxy, method, args);
+        if (cropPath == null) {
+            return super.invoke(proxy, method, args);
+        }
+
+        Log.i(TAG, "profile-crop-io start op=" + method.getName()
+                + " requested=" + cropPath + " resolved=" + redirectedCropPath);
+        try {
+            Object result = super.invoke(proxy, method, args);
+            String resultSummary = result == null || result instanceof Number || result instanceof Boolean
+                    ? String.valueOf(result) : result.getClass().getSimpleName();
+            Log.i(TAG, "profile-crop-io success op=" + method.getName()
+                    + " requested=" + cropPath + " resolved=" + redirectedCropPath
+                    + " result=" + resultSummary);
+            return result;
+        } catch (Throwable error) {
+            Log.e(TAG, "profile-crop-io failure op=" + method.getName()
+                    + " requested=" + cropPath + " resolved=" + redirectedCropPath, error);
+            throw error;
+        }
+    }
+
+    private static boolean isProfileCropPath(String path) {
+        return path != null && (path.contains("profileHeader") || path.contains("sd_can_write"));
     }
 
     @ProxyMethod("getuid")

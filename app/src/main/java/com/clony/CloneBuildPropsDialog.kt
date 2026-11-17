@@ -16,7 +16,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -53,8 +52,7 @@ internal data class CloneBuildProps(
     val time: String = "",
     val osVersion: String = "",
     val release: String = "",
-    val sdkInt: String = "",
-    val enablePlaceholders: Boolean = false
+    val sdkInt: String = ""
 ) {
     val overrideCount: Int
         get() = toValues().count(String::isNotBlank)
@@ -194,7 +192,7 @@ internal fun CloneBuildPropsDialog(
                 modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text("Build props you set override Clony's virtual values for $appLabel. Leave a field blank to keep Clony's default.")
+                Text("Build props you set override Clony's virtual values for $appLabel. Gray values are examples; blank fields keep Clony's default.")
                 val configuredSdk = props.sdkInt.toIntOrNull()
                 val deviceSdk = defaults.sdkInt.toIntOrNull()
                 if (configuredSdk != null && deviceSdk != null && configuredSdk != deviceSdk) {
@@ -209,6 +207,12 @@ internal fun CloneBuildPropsDialog(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Choose matching phone profile · ${matchingProfiles.size}")
+                }
+                OutlinedButton(
+                    onClick = { props = props.withDefaults(defaults) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Fill blank fields with device values")
                 }
                 BuildPropField("Device name", props.deviceName, defaults.deviceName) {
                     props = props.copy(deviceName = it)
@@ -258,30 +262,12 @@ internal fun CloneBuildPropsDialog(
                 BuildPropField("Build.VERSION.SDK_INT", props.sdkInt, defaults.sdkInt, isSdkInt = true) {
                     props = props.copy(sdkInt = it)
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(
-                        checked = props.enablePlaceholders,
-                        onCheckedChange = { enabled ->
-                            props = if (enabled) props.withDefaults(defaults).copy(enablePlaceholders = true)
-                            else props.copy(enablePlaceholders = false)
-                        }
-                    )
-                    Text("Enable placeholders")
-                }
-                if (props.enablePlaceholders) {
-                    Text(
-                        "Blank fields are filled with the current device values shown above.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 12.dp)
-                    )
-                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     TextButton(onClick = { props = CloneBuildProps() }) { Text("Reset") }
-                    TextButton(onClick = { props = props.withDefaults(defaults) }) { Text("Use device values") }
+                    TextButton(onClick = { props = defaults }) { Text("Set all to device values") }
                 }
                 if (!valid) {
                     Text(
@@ -309,7 +295,7 @@ internal fun CloneBuildPropsDialog(
             targetSdkInt = targetSdkInt,
             onDismiss = { showProfiles = false },
             onSelect = { profile ->
-                props = profile.props
+                props = profile.props.withDefaults(defaults)
                 showProfiles = false
             }
         )
@@ -331,7 +317,7 @@ private fun CloneBuildProfilePicker(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Only profiles matching this phone's Android version are shown. You can edit the values before saving.")
                 Text(
-                    "${profiles.size} profiles for API ${targetSdkInt ?: "unknown"}. Most build IDs are test fixtures; the Nubia Z17 stock profile includes best-fit system-field estimates.",
+                    "${profiles.size} profiles for API ${targetSdkInt ?: "unknown"}. Radio, Bootloader, Host, and OS version use this device's reported values when a profile doesn't have verified values. Most build IDs are test fixtures; the Nubia Z17 stock profile includes best-fit system-field estimates.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

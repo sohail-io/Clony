@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import black.android.app.BRContextImplKitkat;
 import top.niunaijun.blackbox.BlackBoxCore;
 
 import top.niunaijun.blackbox.core.env.BEnvironment;
@@ -133,10 +134,11 @@ public class IOCore {
             rule.put(String.format("/data/misc/profiles/cur/%d/%s", BlackBoxCore.getUserId(), packageName), profilesCurDir.getAbsolutePath());
             rule.put(String.format("/data/misc/profiles/ref/%d/%s", BlackBoxCore.getUserId(), packageName), profilesRefDir.getAbsolutePath());
 
-            if (BlackBoxCore.getContext().getExternalCacheDir() != null && context.getExternalCacheDir() != null) {
-                File external = BEnvironment.getExternalUserDir(BlackBoxCore.getUserId());
-
-                
+            // Build the virtual external-storage mapping even when the host or guest
+            // Context reports a null external cache directory. TikTok's crop flow
+            // checks external cache/files before it creates its output directory.
+            File external = BEnvironment.getExternalUserDir(BlackBoxCore.getUserId());
+            if (external != null) {
                 rule.put("/sdcard", external.getAbsolutePath());
                 rule.put(String.format("/storage/emulated/%d", systemUserId), external.getAbsolutePath());
 
@@ -167,7 +169,60 @@ public class IOCore {
         for (String s : blackRule) {
             get().addBlackRedirect(s);
         }
+        if (isTikTokPackage(packageName)) {
+            android.util.Log.i(TAG, "profile-crop-native-hooks enable begin package=" + packageName
+                    + " userId=" + BlackBoxCore.getUserId());
+        }
         NativeCore.enableIO();
+        if (isTikTokPackage(packageName)) {
+            android.util.Log.i(TAG, "profile-crop-native-hooks enable returned package=" + packageName
+                    + " userId=" + BlackBoxCore.getUserId());
+        }
+        exposeVirtualExternalDirs(context, packageName);
+    }
+
+    public void exposeVirtualExternalDirs(Context context, String packageName) {
+        try {
+            Context contextImpl = context;
+            while (contextImpl instanceof android.content.ContextWrapper) {
+                Context baseContext = ((android.content.ContextWrapper) contextImpl).getBaseContext();
+                if (baseContext == null || baseContext == contextImpl) {
+                    break;
+                }
+                contextImpl = baseContext;
+            }
+
+            File backingAppDir = BEnvironment.getExternalDataDir(packageName, BlackBoxCore.getUserId());
+            File backingCacheDir = new File(backingAppDir, "cache");
+            File backingFilesDir = new File(backingAppDir, "files");
+            FileUtils.mkdirs(backingCacheDir);
+            FileUtils.mkdirs(backingFilesDir);
+
+            File visibleAppDir = new File(
+                    new File(Environment.getExternalStorageDirectory(), "Android/data"), packageName);
+            File visibleCacheDir = new File(visibleAppDir, "cache");
+            File visibleFilesDir = new File(visibleAppDir, "files");
+            BRContextImplKitkat.get(contextImpl)._set_mExternalCacheDirs(new File[]{visibleCacheDir});
+            BRContextImplKitkat.get(contextImpl)._set_mExternalFilesDirs(new File[]{visibleFilesDir});
+            if (isTikTokPackage(packageName)) {
+                android.util.Log.i(TAG, "profile-crop-context package=" + packageName
+                        + " userId=" + BlackBoxCore.getUserId()
+                        + " context=" + contextImpl.getClass().getName()
+                        + " cache=" + visibleCacheDir.getAbsolutePath()
+                        + " cacheBackingExists=" + backingCacheDir.isDirectory()
+                        + " cacheBackingWritable=" + backingCacheDir.canWrite()
+                        + " files=" + visibleFilesDir.getAbsolutePath()
+                        + " filesBackingExists=" + backingFilesDir.isDirectory()
+                        + " filesBackingWritable=" + backingFilesDir.canWrite());
+            }
+        } catch (Throwable error) {
+            android.util.Log.w(TAG, "Could not expose virtual external app directories for " + packageName, error);
+        }
+    }
+
+    private static boolean isTikTokPackage(String packageName) {
+        return packageName != null && (packageName.equals("com.zhiliaoapp.musically")
+                || packageName.startsWith("com.zhiliaoapp.musically."));
     }
 
     private void hideRoot(Map<String, String> rule) {

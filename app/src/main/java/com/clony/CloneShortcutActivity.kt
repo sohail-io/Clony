@@ -1,5 +1,6 @@
 package com.clony
 
+import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -10,6 +11,8 @@ import android.os.SystemClock
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CancellationException
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
@@ -20,11 +23,13 @@ import kotlinx.coroutines.withContext
 import top.niunaijun.blackbox.BlackBoxCore
 
 private const val SHORTCUT_TRACE_TAG = "ClonyTrace"
+private const val REQUEST_CODE_CAMERA_PERMISSION = 1003
 
 class CloneShortcutActivity : ComponentActivity() {
     private var launchStartedAtMs = 0L
     private var removeShortcutTaskOnFinish = false
     private var isPinnedShortcutLaunch = false
+    private var cloneRequestsCamera = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         isPinnedShortcutLaunch = intent.flags and Intent.FLAG_ACTIVITY_MULTIPLE_TASK != 0
@@ -53,17 +58,18 @@ class CloneShortcutActivity : ComponentActivity() {
                     return@launch
                 }
 
-                val requestsMedia = withContext(Dispatchers.IO) {
-                    val requestedPermissions = BlackBoxCore.getBPackageManager()
+                val requestedPermissions = withContext(Dispatchers.IO) {
+                    BlackBoxCore.getBPackageManager()
                         .getPackageInfo(packageName, PackageManager.GET_PERMISSIONS, userId)
                         ?.requestedPermissions.orEmpty()
-                    requestedPermissions.any { permission ->
-                        permission == android.Manifest.permission.READ_EXTERNAL_STORAGE ||
-                            permission == android.Manifest.permission.READ_MEDIA_IMAGES ||
-                            permission == android.Manifest.permission.READ_MEDIA_VIDEO ||
-                            permission == android.Manifest.permission.READ_MEDIA_AUDIO ||
-                            permission == "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
-                    }
+                }
+                cloneRequestsCamera = requestedPermissions.contains(Manifest.permission.CAMERA)
+                val requestsMedia = requestedPermissions.any { permission ->
+                    permission == Manifest.permission.READ_EXTERNAL_STORAGE ||
+                        permission == Manifest.permission.READ_MEDIA_IMAGES ||
+                        permission == Manifest.permission.READ_MEDIA_VIDEO ||
+                        permission == Manifest.permission.READ_MEDIA_AUDIO ||
+                        permission == "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
                 }
                 if (requestsMedia && !BlackBoxCore.get().hasStoragePermission()) {
                     traceShortcut("storage_permission_request", packageName, userId)
@@ -71,7 +77,7 @@ class CloneShortcutActivity : ComponentActivity() {
                     return@launch
                 }
 
-                startCloneLaunch(packageName, userId)
+                requestCameraPermissionOrLaunch(packageName, userId)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -90,20 +96,50 @@ class CloneShortcutActivity : ComponentActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode != BlackBoxCore.getStoragePermissionRequestCode()) return
-
         val packageName = intent.getStringExtra(EXTRA_CLONE_PACKAGE)
         val userId = intent.getIntExtra(EXTRA_CLONE_USER_ID, -1)
+
+        if (requestCode == REQUEST_CODE_CAMERA_PERMISSION) {
+            val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED
+            traceShortcut("camera_permission_result granted=" + granted, packageName, userId)
+            if (!granted) {
+                toast("Camera access is off; camera features may not work in this copy.")
+            }
+            if (!packageName.isNullOrBlank() && userId >= 1) {
+                startCloneLaunch(packageName, userId)
+            } else {
+                finishShortcutActivity()
+            }
+            return
+        }
+
+        if (requestCode != BlackBoxCore.getStoragePermissionRequestCode()) return
         val granted = BlackBoxCore.get().hasStoragePermission()
         traceShortcut("storage_permission_result granted=" + granted, packageName, userId)
         if (!granted) {
             toast("Media access is off; uploads may not show your photos or videos.")
         }
         if (!packageName.isNullOrBlank() && userId >= 1) {
-            startCloneLaunch(packageName, userId)
+            requestCameraPermissionOrLaunch(packageName, userId)
         } else {
             finishShortcutActivity()
         }
+    }
+
+    private fun requestCameraPermissionOrLaunch(packageName: String, userId: Int) {
+        val hasCameraPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        if (cloneRequestsCamera && !hasCameraPermission) {
+            traceShortcut("camera_permission_request", packageName, userId)
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.CAMERA),
+                REQUEST_CODE_CAMERA_PERMISSION
+            )
+            return
+        }
+        startCloneLaunch(packageName, userId)
     }
 
     private fun startCloneLaunch(packageName: String, userId: Int) {

@@ -3,6 +3,7 @@ package top.niunaijun.blackbox.fake.service;
 import android.os.IInterface;
 import android.os.Environment;
 import android.os.storage.StorageVolume;
+import android.util.Log;
 
 import java.io.File;
 import java.lang.reflect.Method;
@@ -15,6 +16,7 @@ import black.android.os.storage.BRIStorageManagerStub;
 import top.niunaijun.blackbox.BlackBoxCore;
 import top.niunaijun.blackbox.app.BActivityThread;
 import top.niunaijun.blackbox.core.env.BEnvironment;
+import top.niunaijun.blackbox.core.system.os.BStorageManagerService;
 import top.niunaijun.blackbox.fake.hook.BinderInvocationStub;
 import top.niunaijun.blackbox.fake.hook.MethodHook;
 import top.niunaijun.blackbox.fake.hook.ProxyMethod;
@@ -69,8 +71,36 @@ public class IStorageManagerProxy extends BinderInvocationStub {
                 }
                 return volumeList;
             } catch (Throwable t) {
+                if (isTikTokPackage(BActivityThread.getAppPackageName())) {
+                    Log.e("IStorageManagerProxy", "profile-crop getVolumeList failed userId="
+                            + BActivityThread.getUserId(), t);
+                }
                 return method.invoke(who, args);
             }
+        }
+    }
+
+    @ProxyMethod("getVolumeState")
+    public static class GetVolumeState extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            if (args != null && args.length > 0 && args[0] instanceof String) {
+                Path visibleRoot = Paths.get(Environment.getExternalStorageDirectory().getAbsolutePath())
+                        .toAbsolutePath()
+                        .normalize();
+                Path requestedPath = Paths.get((String) args[0]).toAbsolutePath().normalize();
+                if (isWithin(requestedPath, visibleRoot)) {
+                    boolean writable = BStorageManagerService.isVirtualStorageWritable(BActivityThread.getUserId());
+                    Object state = writable ? Environment.MEDIA_MOUNTED : method.invoke(who, args);
+                    if (isTikTokPackage(BActivityThread.getAppPackageName())) {
+                        Log.i("IStorageManagerProxy", "profile-crop getVolumeState path=" + requestedPath
+                                + " userId=" + BActivityThread.getUserId()
+                                + " backingWritable=" + writable + " state=" + state);
+                    }
+                    return state;
+                }
+            }
+            return method.invoke(who, args);
         }
     }
 
@@ -118,8 +148,14 @@ public class IStorageManagerProxy extends BinderInvocationStub {
             return method.getReturnType() == Void.TYPE ? null : 0;
         }
 
-        private static boolean isWithin(Path path, Path root) {
-            return path.equals(root) || path.startsWith(root);
-        }
+    }
+
+    private static boolean isWithin(Path path, Path root) {
+        return path.equals(root) || path.startsWith(root);
+    }
+
+    private static boolean isTikTokPackage(String packageName) {
+        return packageName != null && (packageName.equals("com.zhiliaoapp.musically")
+                || packageName.startsWith("com.zhiliaoapp.musically."));
     }
 }

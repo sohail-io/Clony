@@ -12,4 +12,7 @@ public interface StorageVolume {
 
     @BField
     File mPath();
+
+    @BField
+    String mState();
 }

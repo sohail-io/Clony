@@ -2,6 +2,7 @@ package top.niunaijun.blackbox.core;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.Build;
 
 /** Stores build-property overrides for a clone and the next copies of an app. */
 public final class CloneBuildPropsStore {
@@ -115,6 +116,22 @@ public final class CloneBuildPropsStore {
         String[] values = new String[PROPERTY_NAMES.length];
         for (int index = 0; index < PROPERTY_NAMES.length; index++) {
             values[index] = preferences.getString(keyPrefix + ":" + PROPERTY_NAMES[index], "");
+        }
+        // Replace test-profile placeholders saved by older app versions with
+        // values reported by the actual device before applying the overrides.
+        if (values[7].startsWith("TEST-RADIO-")) {
+            String radioVersion = Build.getRadioVersion();
+            values[7] = radioVersion == null ? "" : radioVersion;
+        }
+        if (values[8].startsWith("TEST-BOOTLOADER-")) {
+            values[8] = Build.BOOTLOADER == null ? "" : Build.BOOTLOADER;
+        }
+        if ("clony-test-build-host".equals(values[11]) || "nubia-build-host".equals(values[11])) {
+            values[11] = Build.HOST == null ? "" : Build.HOST;
+        }
+        if (values[13].endsWith("-test") || "4.4".equals(values[13])) {
+            String osVersion = System.getProperty("os.version");
+            values[13] = osVersion == null ? "" : osVersion;
         }
         return values;
     }

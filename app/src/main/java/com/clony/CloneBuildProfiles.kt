@@ -40,18 +40,15 @@ private fun DeviceBuildSpec.toProfile(index: Int): CloneBuildProfile {
         product = product,
         device = device,
         board = board,
-        radio = "TEST-RADIO-$device-$sdkInt",
-        bootloader = "TEST-BOOTLOADER-$model",
+        // Profile-specific modem and bootloader identifiers aren't verified.
+        // Leave them blank so the editor can fill them from the real device.
+        radio = "",
+        bootloader = "",
         fingerprint = "$brand/$product/$device:$release/$build/$build:user/release-keys",
         build = build,
-        host = "clony-test-build-host",
+        host = "",
         time = (1735689600000L + index * 86_400_000L).toString(),
-        osVersion = when {
-            sdkInt >= 37 -> "6.12.${120 + index}-android$release-test"
-            sdkInt >= 36 -> "6.6.${120 + index}-android$release-test"
-            sdkInt <= 28 -> "4.4.78-android$release-test"
-            else -> "5.15.${120 + index}-android$release-test"
-        },
+        osVersion = "",
         release = release,
         sdkInt = sdkInt.toString()
     )
@@ -203,9 +200,9 @@ private val nubiaZ17StockProfile = CloneBuildProfile(
         bootloader = "NUBIA_NX563J",
         fingerprint = "nubia/NX563J/NX563J:9/PKQ1.181021.001/eng.nubia.20191015.204132:user/release-keys",
         build = "PKQ1.181021.001",
-        host = "nubia-build-host",
+        host = "",
         time = "1571172092000",
-        osVersion = "4.4",
+        osVersion = "",
         release = "9",
         sdkInt = "28"
     )
