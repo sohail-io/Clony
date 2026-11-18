@@ -9,17 +9,24 @@ import android.os.Process;
 import android.text.TextUtils;
 
 import java.io.File;
+import java.io.BufferedReader;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 
 import black.android.app.BRContextImplKitkat;
 import top.niunaijun.blackbox.BlackBoxCore;
 
 import top.niunaijun.blackbox.core.env.BEnvironment;
+import top.niunaijun.blackbox.core.CloneHardwareIdentityStore;
+import top.niunaijun.blackbox.core.CloneNetworkIdentityStore;
 import top.niunaijun.blackbox.utils.FileUtils;
 import top.niunaijun.blackbox.utils.TrieTree;
 
@@ -41,8 +48,13 @@ public class IOCore {
 
     
     public void addRedirect(String origPath, String redirectPath) {
-        if (TextUtils.isEmpty(origPath) || TextUtils.isEmpty(redirectPath) || mRedirectMap.get(origPath) != null)
+        if (TextUtils.isEmpty(origPath) || TextUtils.isEmpty(redirectPath))
             return;
+        if (origPath.equals(redirectPath)) {
+            mRedirectMap.remove(origPath);
+            NativeCore.removeIORule(origPath);
+            return;
+        }
         
         mTrieTree.add(origPath);
         mRedirectMap.put(origPath, redirectPath);
@@ -73,8 +85,9 @@ public class IOCore {
 
         
         String key = mTrieTree.search(path);
-        if (!TextUtils.isEmpty(key))
-            path = path.replace(key, Objects.requireNonNull(mRedirectMap.get(key)));
+        String mappedPath = TextUtils.isEmpty(key) ? null : mRedirectMap.get(key);
+        if (!TextUtils.isEmpty(mappedPath) && !key.equals(mappedPath))
+            path = path.replace(key, mappedPath);
 
         return path;
     }
@@ -92,8 +105,9 @@ public class IOCore {
 
         
         String key = mTrieTree.search(path);
-        if (!TextUtils.isEmpty(key))
-            path = path.replace(key, Objects.requireNonNull(rule.get(key)));
+        String mappedPath = TextUtils.isEmpty(key) ? null : rule.get(key);
+        if (!TextUtils.isEmpty(mappedPath) && !key.equals(mappedPath))
+            path = path.replace(key, mappedPath);
 
         return path;
     }
@@ -111,6 +125,12 @@ public class IOCore {
         Map<String, String> rule = new LinkedHashMap<>();
         Set<String> blackRule = new HashSet<>();
         String packageName = context.getPackageName();
+        CloneHardwareIdentityStore.Options hardwareOptions = CloneHardwareIdentityStore.read(
+                BlackBoxCore.getContext(), packageName, BlackBoxCore.getUserId());
+        CloneNetworkIdentityStore.Options networkOptions = CloneNetworkIdentityStore.read(
+                BlackBoxCore.getContext(), packageName, BlackBoxCore.getUserId());
+        NativeCore.setHideCpuGpuInfo(hardwareOptions.hideCpuGpuInfo);
+        NativeCore.setHideSimOperatorInfo(networkOptions.hideSimOperatorInfo);
 
         try {
             ApplicationInfo packageInfo = BlackBoxCore.getBPackageManager().getApplicationInfo(packageName, PackageManager.GET_META_DATA, BlackBoxCore.getUserId());
@@ -160,6 +180,11 @@ public class IOCore {
                 hideRoot(rule);
             }
             proc(rule);
+            if (hardwareOptions.hideCpuGpuInfo) {
+                addHardwareIdentityRedirects(rule, context);
+            } else {
+                addHardwareIdentityPassthroughs(rule);
+            }
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -179,6 +204,72 @@ public class IOCore {
                     + " userId=" + BlackBoxCore.getUserId());
         }
         exposeVirtualExternalDirs(context, packageName);
+    }
+
+    private void addHardwareIdentityRedirects(Map<String, String> rule, Context context) {
+        File hardwareRoot = new File(context.getFilesDir(), ".clony/hardware-identity");
+        File gpuRoot = new File(hardwareRoot, "gpu");
+        File cpuInfo = new File(hardwareRoot, "cpuinfo");
+        if (!gpuRoot.mkdirs() && !gpuRoot.isDirectory()) {
+            android.util.Log.w(TAG, "Could not create generic GPU identity directory");
+        }
+
+        try {
+            writeGenericCpuInfo(cpuInfo);
+            rule.put("/proc/cpuinfo", cpuInfo.getAbsolutePath());
+            rule.put("/sys/class/kgsl", new File(gpuRoot, "kgsl").getAbsolutePath());
+            rule.put("/sys/class/misc/mali0", new File(gpuRoot, "mali0").getAbsolutePath());
+            rule.put("/sys/devices/platform/kgsl-3d0", new File(gpuRoot, "kgsl-device").getAbsolutePath());
+        } catch (IOException error) {
+            android.util.Log.w(TAG, "Could not prepare generic hardware identity files", error);
+        }
+    }
+
+    private void addHardwareIdentityPassthroughs(Map<String, String> rule) {
+        // The native process can be reused for another virtual copy. Reset shared
+        // hardware paths so a prior copy's masking does not bleed into this one.
+        rule.put("/proc/cpuinfo", "/proc/cpuinfo");
+        rule.put("/sys/class/kgsl", "/sys/class/kgsl");
+        rule.put("/sys/class/misc/mali0", "/sys/class/misc/mali0");
+        rule.put("/sys/devices/platform/kgsl-3d0", "/sys/devices/platform/kgsl-3d0");
+    }
+
+    private void writeGenericCpuInfo(File destination) throws IOException {
+        int processorCount = 1;
+        File source = new File("/proc/cpuinfo");
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                new FileInputStream(source), StandardCharsets.UTF_8))) {
+            String line;
+            int highestProcessor = -1;
+            while ((line = reader.readLine()) != null) {
+                int separator = line.indexOf(':');
+                if (separator < 0 || !"processor".equalsIgnoreCase(line.substring(0, separator).trim())) {
+                    continue;
+                }
+                try {
+                    highestProcessor = Math.max(highestProcessor,
+                            Integer.parseInt(line.substring(separator + 1).trim()));
+                } catch (NumberFormatException ignored) {
+                    // Keep scanning; a generic single-processor view is used if no count is readable.
+                }
+            }
+            processorCount = Math.max(1, Math.min(64, highestProcessor + 1));
+        } catch (IOException ignored) {
+            // A minimal generic view is still useful when procfs cannot be read.
+        }
+
+        File parent = destination.getParentFile();
+        if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
+            throw new IOException("Could not create hardware identity directory");
+        }
+        try (FileOutputStream output = new FileOutputStream(destination, false)) {
+            for (int index = 0; index < processorCount; index++) {
+                String block = "processor\t: " + index + "\n"
+                        + "Processor\t: Generic Processor\n"
+                        + "BogoMIPS\t: 0.00\n\n";
+                output.write(block.getBytes(StandardCharsets.UTF_8));
+            }
+        }
     }
 
     public void exposeVirtualExternalDirs(Context context, String packageName) {

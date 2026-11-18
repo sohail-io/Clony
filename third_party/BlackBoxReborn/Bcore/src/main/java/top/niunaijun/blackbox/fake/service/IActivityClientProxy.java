@@ -2,6 +2,7 @@ package top.niunaijun.blackbox.fake.service;
 
 import android.app.ActivityManager;
 import android.os.IBinder;
+import android.util.Log;
 
 import java.lang.reflect.Method;
 import java.util.Collections;
@@ -10,6 +11,7 @@ import java.util.WeakHashMap;
 
 import black.android.app.BRActivityClient;
 import black.android.util.BRSingleton;
+import top.niunaijun.blackbox.app.BActivityThread;
 import top.niunaijun.blackbox.fake.frameworks.BActivityManager;
 import top.niunaijun.blackbox.fake.hook.ClassInvocationStub;
 import top.niunaijun.blackbox.fake.hook.MethodHook;
@@ -21,6 +23,7 @@ import top.niunaijun.blackbox.utils.compat.TaskDescriptionCompat;
 @ScanClass(ActivityManagerCommonProxy.class)
 public class IActivityClientProxy extends ClassInvocationStub {
     public static final String TAG = "IActivityClientProxy";
+    private static final String AVATAR_FLOW_TAG = "AvatarFlowTrace";
     private final Object who;
     private static final Map<Object, Object> sControllerProxies =
             Collections.synchronizedMap(new WeakHashMap<>());
@@ -83,8 +86,23 @@ public class IActivityClientProxy extends ClassInvocationStub {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
             IBinder token = (IBinder) args[0];
+            logAvatarFlowFinish(token);
             BActivityManager.get().onFinishActivity(token);
             return method.invoke(who, args);
+        }
+    }
+
+    private static void logAvatarFlowFinish(IBinder token) {
+        try {
+            android.app.Activity activity = BActivityThread.getActivityByToken(token);
+            if (activity == null) return;
+            String activityName = activity.getClass().getName();
+            if (activityName.contains(".profile.avatar.")
+                    || activityName.contains(".profile.business.ur.")) {
+                Log.i(AVATAR_FLOW_TAG, "finish requested activity=" + activityName);
+            }
+        } catch (Throwable error) {
+            Log.w(AVATAR_FLOW_TAG, "could not resolve activity for finish request", error);
         }
     }
 

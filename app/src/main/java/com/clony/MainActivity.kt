@@ -87,11 +87,15 @@ import com.clony.ui.theme.ClonyTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import top.niunaijun.blackbox.BlackBoxCore
 import top.niunaijun.blackbox.core.CloneBuildPropsStore
 import top.niunaijun.blackbox.core.CloneDeviceModelStore
+import top.niunaijun.blackbox.core.CloneHardwareIdentityStore
 import top.niunaijun.blackbox.core.CloneFingerprintStore
+import top.niunaijun.blackbox.core.CloneNetworkIdentityStore
 import top.niunaijun.blackbox.fake.service.VirtualDeviceIdentity
 import java.util.Locale
 import java.util.UUID
@@ -105,6 +109,14 @@ internal const val ACTION_SHORTCUT_PINNED = "com.clony.action.SHORTCUT_PINNED"
 internal const val EXTRA_SHORTCUT_LABEL = "com.clony.extra.SHORTCUT_LABEL"
 private const val SHORTCUT_PREFERENCES = "clone_shortcuts"
 private const val TRACE_TAG = "ClonyTrace"
+
+private enum class CloneFeatureScreen {
+    CLONE_SETTINGS,
+    IDENTITY_OPERATIONS,
+    NETWORK_RADIO_IDENTITY,
+    CONNECTION_OPERATOR_INFO,
+    DEVICE_PROFILE_HARDWARE
+}
 
 private fun packageNameDrafts(
     app: AppTile,
@@ -142,6 +154,8 @@ data class AppTile(
 }
 
 class MainActivity : ComponentActivity() {
+    private val networkIdentitySettingsMutex = Mutex()
+    private val hardwareIdentitySettingsMutex = Mutex()
     private var launcherQueue = LauncherInstallQueue()
     private var waitingForInstallPermission = false
     private val pendingHomeShortcutPins = mutableListOf<AppTile>()
@@ -230,6 +244,8 @@ class MainActivity : ComponentActivity() {
                     onOpenClone = ::openClone,
                     onCreateCopies = ::createCopies,
                     onSaveBuildPropsTemplate = ::saveBuildPropsTemplate,
+                    onSaveNetworkIdentitySettings = ::saveNetworkIdentitySettings,
+                    onSaveHardwareIdentitySettings = ::saveHardwareIdentitySettings,
                     onPinClone = { tile -> pinCloneShortcut(tile) },
                     onDeleteClone = ::deleteClone
                 )
@@ -645,6 +661,16 @@ class MainActivity : ComponentActivity() {
                     }.onFailure {
                         Log.w(TRACE_TAG, "clone_delete stage=device_model_cleanup_failed package=${tile.packageName} userId=$userId", it)
                     }
+                    runCatching {
+                        CloneNetworkIdentityStore.delete(this@MainActivity, tile.packageName, userId)
+                    }.onFailure {
+                        Log.w(TRACE_TAG, "clone_delete stage=network_identity_cleanup_failed package=${tile.packageName} userId=$userId", it)
+                    }
+                    runCatching {
+                        CloneHardwareIdentityStore.delete(this@MainActivity, tile.packageName, userId)
+                    }.onFailure {
+                        Log.w(TRACE_TAG, "clone_delete stage=hardware_identity_cleanup_failed package=${tile.packageName} userId=$userId", it)
+                    }
                     if (!CloneBuildPropsStore.delete(this@MainActivity, tile.packageName, userId)) {
                         Log.w(TRACE_TAG, "clone_delete stage=build_props_cleanup_failed package=${tile.packageName} userId=$userId")
                     }
@@ -772,12 +798,102 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun saveNetworkIdentitySettings(
+        tile: AppTile,
+        userId: Int?,
+        settings: CloneNetworkIdentitySettings
+    ) {
+        lifecycleScope.launch {
+            try {
+                networkIdentitySettingsMutex.withLock {
+                    val saved = withContext(Dispatchers.IO) {
+                        if (userId == null) {
+                            CloneNetworkIdentityStore.writeTemplate(
+                                this@MainActivity, tile.packageName, settings.toStoreOptions()
+                            )
+                        } else {
+                            CloneNetworkIdentityStore.write(
+                                this@MainActivity, tile.packageName, userId, settings.toStoreOptions()
+                            )
+                        }
+                    }
+                    if (!saved) error("Couldn't save the network identity settings.")
+                    if (userId != null) {
+                        withContext(Dispatchers.IO) {
+                            BlackBoxCore.get().stopPackage(tile.packageName, userId)
+                        }
+                    }
+                }
+                if (userId != null) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Saved for ${tile.label}. Reopen the copy to apply the changes.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } catch (error: Throwable) {
+                Log.e(TRACE_TAG, "network_identity_save_failed package=${tile.packageName} userId=$userId", error)
+                Toast.makeText(
+                    this@MainActivity,
+                    error.message?.takeIf(String::isNotBlank) ?: "Couldn't save network identity settings.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+
+    private fun saveHardwareIdentitySettings(
+        tile: AppTile,
+        userId: Int?,
+        settings: CloneHardwareIdentitySettings
+    ) {
+        lifecycleScope.launch {
+            try {
+                hardwareIdentitySettingsMutex.withLock {
+                    val saved = withContext(Dispatchers.IO) {
+                        if (userId == null) {
+                            CloneHardwareIdentityStore.writeTemplate(
+                                this@MainActivity, tile.packageName, settings.toStoreOptions()
+                            )
+                        } else {
+                            CloneHardwareIdentityStore.write(
+                                this@MainActivity, tile.packageName, userId, settings.toStoreOptions()
+                            )
+                        }
+                    }
+                    if (!saved) error("Couldn't save the hardware settings.")
+                    if (userId != null) {
+                        withContext(Dispatchers.IO) {
+                            BlackBoxCore.get().stopPackage(tile.packageName, userId)
+                        }
+                    }
+                }
+                if (userId != null) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Saved hardware settings for ${tile.displayName}. Reopen the copy to apply them.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } catch (error: Throwable) {
+                Log.e(TRACE_TAG, "hardware_identity_save_failed package=${tile.packageName} userId=$userId", error)
+                Toast.makeText(
+                    this@MainActivity,
+                    error.message?.takeIf(String::isNotBlank) ?: "Couldn't save hardware settings.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+
     private fun shortcutPreferenceKey(packageName: String, userId: Int) = "$packageName:$userId"
 
     private fun createCopies(
         tile: AppTile,
         packageNames: List<String>,
-        buildProps: CloneBuildProps = CloneBuildProps()
+        buildProps: CloneBuildProps = CloneBuildProps(),
+        identitySettings: CloneNetworkIdentitySettings = CloneNetworkIdentitySettings(),
+        hardwareSettings: CloneHardwareIdentitySettings = CloneHardwareIdentitySettings()
     ) {
         if (busyPackageState.value != null) return
         val requestedPackageNames = packageNames.map { it.trim() }
@@ -821,6 +937,16 @@ class MainActivity : ComponentActivity() {
                         )) {
                         error("Couldn't save the build properties for future copies.")
                     }
+                    if (!CloneNetworkIdentityStore.writeTemplate(
+                            this@MainActivity, tile.packageName, identitySettings.toStoreOptions()
+                        )) {
+                        error("Couldn't save network identity settings for future copies.")
+                    }
+                    if (!CloneHardwareIdentityStore.writeTemplate(
+                            this@MainActivity, tile.packageName, hardwareSettings.toStoreOptions()
+                        )) {
+                        error("Couldn't save hardware settings for future copies.")
+                    }
                     val existingCopyCount = users.count { runtime.isInstalled(tile.packageName, it.id) }
                     if (existingCopyCount + copiesToCreate > MAX_COPIES_PER_APP) {
                         error("${tile.label} already has the maximum of $MAX_COPIES_PER_APP copies.")
@@ -849,6 +975,21 @@ class MainActivity : ComponentActivity() {
                                 )
                             ) {
                                 error("Couldn't save build properties for copy ${index + 1}.")
+                            }
+                            if (!CloneNetworkIdentityStore.write(
+                                    this@MainActivity, tile.packageName, user.id, identitySettings.toStoreOptions()
+                                )
+                            ) {
+                                error("Couldn't save network identity settings for copy ${index + 1}.")
+                            }
+                            if (!CloneHardwareIdentityStore.write(
+                                    this@MainActivity,
+                                    tile.packageName,
+                                    user.id,
+                                    hardwareSettings.toStoreOptions()
+                                )
+                            ) {
+                                error("Couldn't save hardware settings for copy ${index + 1}.")
                             }
                             val result = runtime.installInstalledPackageAsUser(tile.packageName, user.id)
                             if (result == null) {
@@ -894,6 +1035,12 @@ class MainActivity : ComponentActivity() {
                                 CloneBuildPropsStore.delete(this@MainActivity, tile.packageName, createdUserId)
                             }
                             runCatching {
+                                CloneNetworkIdentityStore.delete(this@MainActivity, tile.packageName, createdUserId)
+                            }
+                            runCatching {
+                                CloneHardwareIdentityStore.delete(this@MainActivity, tile.packageName, createdUserId)
+                            }
+                            runCatching {
                                 ClonePackageNameStore.delete(this@MainActivity, tile.packageName, createdUserId)
                             }
                             runCatching { runtime.deleteUser(createdUserId) }
@@ -930,6 +1077,12 @@ class MainActivity : ComponentActivity() {
         val buildProps = CloneBuildProps.fromValues(
             CloneBuildPropsStore.readTemplate(this, packageName)
         )
+        val identitySettings = CloneNetworkIdentitySettings.fromStore(
+            CloneNetworkIdentityStore.readTemplate(this, packageName)
+        )
+        val hardwareSettings = CloneHardwareIdentitySettings.fromStore(
+            CloneHardwareIdentityStore.readTemplate(this, packageName)
+        )
         val packageNames = retryPackageNamesState.value
             .takeIf { it.size == retryCopyCountState.value }
             ?: List(retryCopyCountState.value) { index ->
@@ -938,7 +1091,7 @@ class MainActivity : ComponentActivity() {
                     CloneCopyNameStore.nextNumber(this, tile.packageName) + index
                 )
             }
-        createCopies(tile, packageNames, buildProps)
+        createCopies(tile, packageNames, buildProps, identitySettings, hardwareSettings)
     }
 
     private fun showProgress(packageName: String, message: String) {
@@ -988,8 +1141,10 @@ private fun ClonyHomeRedesigned(
     onRetry: (String) -> Unit,
     onRefresh: () -> Unit,
     onOpenClone: (AppTile) -> Unit,
-    onCreateCopies: (AppTile, List<String>, CloneBuildProps) -> Unit,
+    onCreateCopies: (AppTile, List<String>, CloneBuildProps, CloneNetworkIdentitySettings, CloneHardwareIdentitySettings) -> Unit,
     onSaveBuildPropsTemplate: (AppTile, CloneBuildProps) -> Unit,
+    onSaveNetworkIdentitySettings: (AppTile, Int?, CloneNetworkIdentitySettings) -> Unit,
+    onSaveHardwareIdentitySettings: (AppTile, Int?, CloneHardwareIdentitySettings) -> Unit,
     onPinClone: (AppTile) -> Unit,
     onDeleteClone: (AppTile) -> Unit
 ) {
@@ -1002,9 +1157,12 @@ private fun ClonyHomeRedesigned(
     var networkApp by remember { mutableStateOf<AppTile?>(null) }
     var proxyPickerSource by remember { mutableStateOf<AppTile?>(null) }
     var showBuildProps by remember { mutableStateOf(false) }
+    var cloneFeatureScreen by remember { mutableStateOf(CloneFeatureScreen.CLONE_SETTINGS) }
     var cloneCount by remember { mutableStateOf(1) }
     var packageNames by remember { mutableStateOf(emptyList<String>()) }
     var buildProps by remember { mutableStateOf(CloneBuildProps()) }
+    var networkIdentitySettings by remember { mutableStateOf(CloneNetworkIdentitySettings()) }
+    var hardwareIdentitySettings by remember { mutableStateOf(CloneHardwareIdentitySettings()) }
     val context = LocalContext.current
     val systemApps = remember(apps) {
         apps.groupBy { it.packageName }.values.map { copies ->
@@ -1026,6 +1184,26 @@ private fun ClonyHomeRedesigned(
         }
     }
     val namesForRequest = packageNames.take(cloneCount).map(String::trim)
+    val identitySettingsForNewCopies = remember(
+        detailApp?.packageName,
+        editingClone?.virtualUserId,
+        networkIdentitySettings
+    ) {
+        if (detailApp == null || editingClone == null) networkIdentitySettings
+        else CloneNetworkIdentitySettings.fromStore(
+            CloneNetworkIdentityStore.readTemplate(context, detailApp.packageName)
+        )
+    }
+    val hardwareSettingsForNewCopies = remember(
+        detailApp?.packageName,
+        editingClone?.virtualUserId,
+        hardwareIdentitySettings
+    ) {
+        if (detailApp == null || editingClone == null) hardwareIdentitySettings
+        else CloneHardwareIdentitySettings.fromStore(
+            CloneHardwareIdentityStore.readTemplate(context, detailApp.packageName)
+        )
+    }
     val requestValid = detailApp != null &&
         cloneCount in 1..(MAX_COPIES_PER_APP - (detailApp?.copyCount ?: 0)) &&
         namesForRequest.size == cloneCount &&
@@ -1050,18 +1228,43 @@ private fun ClonyHomeRedesigned(
     }
 
     androidx.activity.compose.BackHandler(enabled = detailPackage != null) {
-        detailPackage = null
-        editingClone = null
+        when (cloneFeatureScreen) {
+            CloneFeatureScreen.NETWORK_RADIO_IDENTITY -> {
+                cloneFeatureScreen = CloneFeatureScreen.IDENTITY_OPERATIONS
+            }
+            CloneFeatureScreen.CONNECTION_OPERATOR_INFO -> {
+                cloneFeatureScreen = CloneFeatureScreen.IDENTITY_OPERATIONS
+            }
+            CloneFeatureScreen.DEVICE_PROFILE_HARDWARE -> {
+                cloneFeatureScreen = CloneFeatureScreen.IDENTITY_OPERATIONS
+            }
+            CloneFeatureScreen.IDENTITY_OPERATIONS -> {
+                cloneFeatureScreen = CloneFeatureScreen.CLONE_SETTINGS
+            }
+            CloneFeatureScreen.CLONE_SETTINGS -> {
+                detailPackage = null
+                editingClone = null
+            }
+        }
     }
 
     fun openSystemApp(app: AppTile, cloneToEdit: AppTile? = null) {
         detailPackage = app.packageName
         editingClone = cloneToEdit
+        cloneFeatureScreen = CloneFeatureScreen.CLONE_SETTINGS
         cloneCount = 1
         packageNames = packageNameDrafts(
             app, 1, occupiedNames, CloneCopyNameStore.nextNumber(context, app.packageName)
         )
         buildProps = CloneBuildProps.fromValues(CloneBuildPropsStore.readTemplate(context, app.packageName))
+        networkIdentitySettings = CloneNetworkIdentitySettings.fromStore(
+            cloneToEdit?.virtualUserId?.let { CloneNetworkIdentityStore.read(context, app.packageName, it) }
+                ?: CloneNetworkIdentityStore.readTemplate(context, app.packageName)
+        )
+        hardwareIdentitySettings = CloneHardwareIdentitySettings.fromStore(
+            cloneToEdit?.virtualUserId?.let { CloneHardwareIdentityStore.read(context, app.packageName, it) }
+                ?: CloneHardwareIdentityStore.readTemplate(context, app.packageName)
+        )
     }
 
     Scaffold(
@@ -1096,11 +1299,17 @@ private fun ClonyHomeRedesigned(
             }
         },
         floatingActionButton = {
-            if (detailApp != null) {
+            if (detailApp != null && cloneFeatureScreen == CloneFeatureScreen.CLONE_SETTINGS) {
                 FloatingActionButton(
                     onClick = {
                         if (requestValid && busyPackageName == null) {
-                            onCreateCopies(detailApp, namesForRequest, buildProps)
+                            onCreateCopies(
+                                detailApp,
+                                namesForRequest,
+                                buildProps,
+                                identitySettingsForNewCopies,
+                                hardwareSettingsForNewCopies
+                            )
                         }
                     },
                     containerColor = if (requestValid && busyPackageName == null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
@@ -1133,71 +1342,161 @@ private fun ClonyHomeRedesigned(
                         Text("CLONY", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
                         Text("Private app copies", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                    TextButton(onClick = onRefresh) { Text("Refresh") }
                 } else {
-                    TextButton(onClick = { detailPackage = null; editingClone = null }) { Text("← Back") }
-                    Image(detailApp.icon, null, Modifier.size(42.dp).clip(RoundedCornerShape(13.dp)))
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(detailApp.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(
-                            editingClone?.let { "Editing " + it.displayName } ?: "System app",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                    if (cloneFeatureScreen == CloneFeatureScreen.CLONE_SETTINGS) {
+                        TextButton(onClick = { detailPackage = null; editingClone = null }) { Text("← Back") }
+                        Image(detailApp.icon, null, Modifier.size(42.dp).clip(RoundedCornerShape(13.dp)))
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(detailApp.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                editingClone?.let { "Editing " + it.displayName } ?: "System app",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        TextButton(onClick = onRefresh) { Text("Refresh") }
+                    } else {
+                        val pageTitle = when (cloneFeatureScreen) {
+                            CloneFeatureScreen.IDENTITY_OPERATIONS -> "Identity & tracking operations"
+                            CloneFeatureScreen.NETWORK_RADIO_IDENTITY -> "Network & radio identity"
+                            CloneFeatureScreen.CONNECTION_OPERATOR_INFO -> "Connection & operator info"
+                            CloneFeatureScreen.DEVICE_PROFILE_HARDWARE -> "Device profile & hardware"
+                            CloneFeatureScreen.CLONE_SETTINGS -> "Clone settings"
+                        }
+                        val backTarget = if (
+                            cloneFeatureScreen == CloneFeatureScreen.NETWORK_RADIO_IDENTITY ||
+                            cloneFeatureScreen == CloneFeatureScreen.CONNECTION_OPERATOR_INFO ||
+                            cloneFeatureScreen == CloneFeatureScreen.DEVICE_PROFILE_HARDWARE
+                        ) {
+                            CloneFeatureScreen.IDENTITY_OPERATIONS
+                        } else {
+                            CloneFeatureScreen.CLONE_SETTINGS
+                        }
+                        TextButton(onClick = { cloneFeatureScreen = backTarget }) { Text("← Back") }
+                        Column(Modifier.weight(1f)) {
+                            Text(pageTitle, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                editingClone?.displayName ?: detailApp.label,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
-                TextButton(onClick = onRefresh) { Text("Refresh") }
             }
 
             if (detailApp != null) {
-                LazyColumn(
-                    Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 104.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    if (message != null) item {
-                        HomeMessageCard(message, messageIsError, busyPackageName != null, retryPackageName, onCopyDiagnostics, onRetry, onMessageDismissed)
-                    }
-                    item { Text("Clone settings", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
-                    item {
-                        DetailActionCard(
-                            title = "Number of clones",
-                            description = when {
-                                detailApp.copyCount >= MAX_COPIES_PER_APP -> "Maximum of ${MAX_COPIES_PER_APP} clones reached"
-                                detailApp.copyCount == 0 -> "No copies yet · tap to choose how many to add"
-                                else -> "${detailApp.copyCount} existing · tap to choose how many to add"
-                            },
-                            value = detailApp.copyCount.toString(),
-                            enabled = detailApp.copyCount < MAX_COPIES_PER_APP
-                        ) { countSheetApp = detailApp }
-                    }
-                    item {
-                        DetailActionCard(
-                            "Build props",
-                            if (buildProps.overrideCount == 0) "Clony defaults will be used"
-                            else "${buildProps.overrideCount} custom values for new copies",
-                            "Edit"
-                        ) { showBuildProps = true }
-                    }
-                    item {
-                        DetailActionCard(
-                            title = "Proxy / network",
-                            description = editingClone?.let { "Configure the connection for " + it.displayName } ?: when (detailClones.size) {
-                                0 -> "Create a clone to configure its connection"
-                                1 -> "Configure the connection for 1 clone"
-                                else -> "Configure the connection for " + detailClones.size + " clones"
-                            },
-                            value = if (editingClone != null || detailClones.size == 1) "Edit" else detailClones.size.toString(),
-                            enabled = editingClone != null || detailClones.isNotEmpty()
-                        ) {
-                            when {
-                                editingClone != null -> networkApp = editingClone
-                                detailClones.size == 1 -> networkApp = detailClones.first()
-                                detailClones.size > 1 -> proxyPickerSource = detailApp
+                when (cloneFeatureScreen) {
+                    CloneFeatureScreen.CLONE_SETTINGS -> LazyColumn(
+                        Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 104.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        if (message != null) item {
+                            HomeMessageCard(message, messageIsError, busyPackageName != null, retryPackageName, onCopyDiagnostics, onRetry, onMessageDismissed)
+                        }
+                        item { Text("Cloning features", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
+                        item {
+                            DetailActionCard(
+                                title = "Number of clones",
+                                description = when {
+                                    detailApp.copyCount >= MAX_COPIES_PER_APP -> "Maximum of ${MAX_COPIES_PER_APP} clones reached"
+                                    detailApp.copyCount == 0 -> "No copies yet · tap to choose how many to add"
+                                    else -> "${detailApp.copyCount} existing · tap to choose how many to add"
+                                },
+                                value = detailApp.copyCount.toString(),
+                                enabled = detailApp.copyCount < MAX_COPIES_PER_APP
+                            ) { countSheetApp = detailApp }
+                        }
+                        item {
+                            DetailActionCard(
+                                "Build props",
+                                if (buildProps.overrideCount == 0) "Clony defaults will be used"
+                                else "${buildProps.overrideCount} custom values for new copies",
+                                "Edit"
+                            ) { showBuildProps = true }
+                        }
+                        item {
+                            DetailActionCard(
+                                title = "Identity, privacy & spoofing",
+                                description = "Device, network and radio identity options",
+                                value = "Open"
+                            ) { cloneFeatureScreen = CloneFeatureScreen.IDENTITY_OPERATIONS }
+                        }
+                        item {
+                            DetailActionCard(
+                                title = "Proxy / network",
+                                description = editingClone?.let { "Configure the connection for " + it.displayName } ?: when (detailClones.size) {
+                                    0 -> "Create a clone to configure its connection"
+                                    1 -> "Configure the connection for 1 clone"
+                                    else -> "Configure the connection for " + detailClones.size + " clones"
+                                },
+                                value = if (editingClone != null || detailClones.size == 1) "Edit" else detailClones.size.toString(),
+                                enabled = editingClone != null || detailClones.isNotEmpty()
+                            ) {
+                                when {
+                                    editingClone != null -> networkApp = editingClone
+                                    detailClones.size == 1 -> networkApp = detailClones.first()
+                                    detailClones.size > 1 -> proxyPickerSource = detailApp
+                                }
                             }
                         }
+                        item { Text(detailApp.packageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                     }
-                    item { Text(detailApp.packageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    CloneFeatureScreen.IDENTITY_OPERATIONS -> IdentityTrackingOperationsScreen(
+                        appLabel = detailApp.label,
+                        editingCloneName = editingClone?.displayName,
+                        onOpenNetworkRadioIdentity = {
+                            cloneFeatureScreen = CloneFeatureScreen.NETWORK_RADIO_IDENTITY
+                        },
+                        onOpenConnectionOperatorInfo = {
+                            cloneFeatureScreen = CloneFeatureScreen.CONNECTION_OPERATOR_INFO
+                        },
+                        onOpenDeviceProfileHardware = {
+                            cloneFeatureScreen = CloneFeatureScreen.DEVICE_PROFILE_HARDWARE
+                        }
+                    )
+                    CloneFeatureScreen.NETWORK_RADIO_IDENTITY -> NetworkRadioIdentityScreen(
+                        appLabel = detailApp.label,
+                        editingCloneName = editingClone?.displayName,
+                        settings = networkIdentitySettings,
+                        onSettingsChange = { updatedSettings ->
+                            networkIdentitySettings = updatedSettings
+                            onSaveNetworkIdentitySettings(
+                                detailApp,
+                                editingClone?.virtualUserId,
+                                updatedSettings
+                            )
+                        }
+                    )
+                    CloneFeatureScreen.CONNECTION_OPERATOR_INFO -> ConnectionOperatorInfoScreen(
+                        appLabel = detailApp.label,
+                        editingCloneName = editingClone?.displayName,
+                        settings = networkIdentitySettings,
+                        onSettingsChange = { updatedSettings ->
+                            networkIdentitySettings = updatedSettings
+                            onSaveNetworkIdentitySettings(
+                                detailApp,
+                                editingClone?.virtualUserId,
+                                updatedSettings
+                            )
+                        }
+                    )
+                    CloneFeatureScreen.DEVICE_PROFILE_HARDWARE -> DeviceProfileHardwareScreen(
+                        appLabel = detailApp.label,
+                        editingCloneName = editingClone?.displayName,
+                        settings = hardwareIdentitySettings,
+                        onSettingsChange = { updatedSettings ->
+                            hardwareIdentitySettings = updatedSettings
+                            onSaveHardwareIdentitySettings(
+                                detailApp,
+                                editingClone?.virtualUserId,
+                                updatedSettings
+                            )
+                        }
+                    )
                 }
             } else {
                 if (selectedTab == 0) {
@@ -1481,7 +1780,7 @@ private fun HomeMessageCard(
 }
 
 @Composable
-private fun DetailActionCard(title: String, description: String, value: String, enabled: Boolean = true, onClick: () -> Unit) {
+internal fun DetailActionCard(title: String, description: String, value: String, enabled: Boolean = true, onClick: () -> Unit) {
     Card(
         onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)

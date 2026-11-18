@@ -461,6 +461,14 @@ public class BActivityThread extends IBActivityThread.Stub {
         }
 
         NativeCore.init(Build.VERSION.SDK_INT);
+        boolean hiddenApiAccessEnabled = NativeCore.disableHiddenApi();
+        if (hiddenApiAccessEnabled) {
+            Slog.i(TAG, "profile-crop-native-hooks hidden API access enabled package=" + packageName
+                    + " userId=" + getUserId());
+        } else {
+            Slog.w(TAG, "profile-crop-native-hooks hidden API access unavailable package=" + packageName
+                    + " userId=" + getUserId());
+        }
         String buildFingerprint = CloneFingerprintStore.read(
                 BlackBoxCore.getContext(), packageName, getUserId());
         boolean fingerprintApplied = NativeCore.setBuildFingerprint(buildFingerprint);

@@ -44,6 +44,7 @@ import top.niunaijun.blackbox.utils.compat.BundleCompat;
 
 public class HCallbackProxy implements IInjectHook, Handler.Callback {
     public static final String TAG = "HCallbackStub";
+    private static final String AVATAR_FLOW_TAG = "AvatarFlowTrace";
     // ActivityThread.H message numbers used by Android 9 through Android 16.
     // Reading the corresponding hidden H fields is blocked for Clony's target SDK.
     private static final int EXECUTE_TRANSACTION = 159;
@@ -130,6 +131,17 @@ public class HCallbackProxy implements IInjectHook, Handler.Callback {
         try {
             List<Object> callbacks = BRClientTransaction.get(clientTransaction).mActivityCallbacks();
             if (callbacks == null) return;
+            String receiverName = "unknown";
+            try {
+                IBinder activityToken = BRClientTransaction.get(clientTransaction).mActivityToken();
+                Activity receiver = activityToken == null
+                        ? null : BActivityThread.getActivityByToken(activityToken);
+                if (receiver != null) {
+                    receiverName = receiver.getClass().getName();
+                }
+            } catch (Throwable ignored) {
+                // Keep URI-grant preservation independent from optional trace metadata.
+            }
             Class<?> resultItemClass = BRActivityResultItem.getRealClass();
             for (Object callback : callbacks) {
                 if (callback == null || !resultItemClass.isInstance(callback)) continue;
@@ -138,14 +150,28 @@ public class HCallbackProxy implements IInjectHook, Handler.Callback {
                 for (Object result : results) {
                     if (result == null) continue;
                     black.android.app.ResultInfoContext resultInfo = BRResultInfo.get(result);
-                    if (Integer.valueOf(Activity.RESULT_OK).equals(resultInfo.mResultCode())) {
-                        PersistableUriGrant.preserve(resultInfo.mData());
+                    Integer resultCode = resultInfo.mResultCode();
+                    Intent data = resultInfo.mData();
+                    if (isAvatarFlowActivity(receiverName)) {
+                        String uriScheme = data == null || data.getData() == null
+                                ? "none" : data.getData().getScheme();
+                        Slog.i(AVATAR_FLOW_TAG, "activity result receiver=" + receiverName
+                                + " resultCode=" + resultCode + " hasData=" + (data != null)
+                                + " uriScheme=" + uriScheme);
+                    }
+                    if (Integer.valueOf(Activity.RESULT_OK).equals(resultCode)) {
+                        PersistableUriGrant.preserve(data);
                     }
                 }
             }
         } catch (Throwable error) {
             Slog.w(TAG, "Could not preserve URI access from an activity result", error);
         }
+    }
+
+    private static boolean isAvatarFlowActivity(String activityName) {
+        return activityName != null && (activityName.contains(".profile.avatar.")
+                || activityName.contains(".profile.business.ur."));
     }
 
     private boolean handleLaunchActivity(Object client) {

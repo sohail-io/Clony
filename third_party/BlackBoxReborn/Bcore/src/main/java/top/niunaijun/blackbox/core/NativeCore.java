@@ -31,6 +31,8 @@ public class NativeCore {
 
     public static native void addIORule(String targetPath, String relocatePath);
 
+    public static native void removeIORule(String targetPath);
+
     public static native void hideXposed();
 
     public static native boolean disableHiddenApi();
@@ -45,6 +47,12 @@ public class NativeCore {
 
     /** Applies an explicitly configured virtual device model to Android's property and Build APIs. */
     public static native boolean setDeviceModel(String model);
+
+    /** Hides common CPU and GPU vendor/model identifiers for the active virtual copy. */
+    public static native boolean setHideCpuGpuInfo(boolean hide);
+
+    /** Hides SIM and mobile operator identity properties for the active virtual copy. */
+    public static native boolean setHideSimOperatorInfo(boolean hide);
 
     private static native boolean setBuildPropsNative(String[] propertyNames, String[] values);
 

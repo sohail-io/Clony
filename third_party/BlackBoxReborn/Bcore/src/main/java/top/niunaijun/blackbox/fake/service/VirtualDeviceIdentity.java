@@ -224,6 +224,58 @@ public final class VirtualDeviceIdentity {
         return digits;
     }
 
+    /** Returns a stable locally administered unicast MAC address for one virtual copy. */
+    public static String getNetworkMacAddress(
+            Context context,
+            String packageName,
+            int userId,
+            String identifierKind
+    ) {
+        byte[] digest = derive(context, packageName, userId, identifierKind);
+        if (digest == null || digest.length < 6) return "02:00:00:00:00:00";
+        byte[] address = new byte[6];
+        System.arraycopy(digest, 0, address, 0, address.length);
+        address[0] = (byte) ((address[0] & 0xfc) | 0x02);
+        char[] hex = "0123456789abcdef".toCharArray();
+        StringBuilder value = new StringBuilder(17);
+        for (int index = 0; index < address.length; index++) {
+            if (index > 0) value.append(':');
+            int unsigned = address[index] & 0xff;
+            value.append(hex[unsigned >>> 4]).append(hex[unsigned & 0x0f]);
+        }
+        return value.toString();
+    }
+
+    /** Returns a stable randomized battery percentage for a single virtual copy. */
+    public static int getBatteryLevel(Context context, String packageName, int userId) {
+        return deriveSmallValue(context, packageName, userId, "battery_level", 25, 91, 65);
+    }
+
+    /** Returns a stable randomized battery temperature in tenths of a degree Celsius. */
+    public static int getBatteryTemperature(Context context, String packageName, int userId) {
+        return deriveSmallValue(context, packageName, userId, "battery_temperature", 250, 391, 315);
+    }
+
+    /** Returns a consistent randomized charge counter in microampere-hours. */
+    public static long getBatteryChargeCounter(Context context, String packageName, int userId) {
+        int level = getBatteryLevel(context, packageName, userId);
+        int designCapacityMah = deriveSmallValue(
+                context, packageName, userId, "battery_capacity_mah", 3200, 6401, 4500);
+        return (long) level * designCapacityMah * 10L;
+    }
+
+    private static int deriveSmallValue(
+            Context context, String packageName, int userId,
+            String kind, int minimum, int maximumExclusive, int fallback) {
+        byte[] digest = derive(context, packageName, userId, kind);
+        if (digest == null || digest.length < 4 || maximumExclusive <= minimum) return fallback;
+        long value = ((digest[0] & 0xffL) << 24)
+                | ((digest[1] & 0xffL) << 16)
+                | ((digest[2] & 0xffL) << 8)
+                | (digest[3] & 0xffL);
+        return minimum + (int) (value % (maximumExclusive - minimum));
+    }
+
     /**
      * Generates fresh telephony IDs for a new clone. Older clones without a v2 record
      * continue using their original seed-derived IDs, so an app update does not rotate them.

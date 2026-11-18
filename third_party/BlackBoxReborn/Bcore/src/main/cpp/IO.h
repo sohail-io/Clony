@@ -9,6 +9,7 @@
 
 #include <list>
 #include <iostream>
+#include <string>
 #include "BoxCore.h"
 
 using namespace std;
@@ -18,11 +19,13 @@ public:
     static void init(JNIEnv *env);
 
     struct RelocateInfo {
-        const char *targetPath;
-        const char *relocatePath;
+        std::string targetPath;
+        std::string relocatePath;
     };
 
     static void addRule(const char *targetPath, const char *relocatePath);
+
+    static void removeRule(const char *targetPath);
 
     static jstring redirectPath(JNIEnv *env, jstring path);
 

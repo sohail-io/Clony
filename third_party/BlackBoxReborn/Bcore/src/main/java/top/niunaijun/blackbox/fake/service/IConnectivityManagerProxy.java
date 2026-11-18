@@ -16,6 +16,9 @@ import java.util.List;
 
 import black.android.net.BRIConnectivityManagerStub;
 import black.android.os.BRServiceManager;
+import top.niunaijun.blackbox.BlackBoxCore;
+import top.niunaijun.blackbox.app.BActivityThread;
+import top.niunaijun.blackbox.core.CloneNetworkIdentityStore;
 import top.niunaijun.blackbox.fake.hook.BinderInvocationStub;
 import top.niunaijun.blackbox.fake.hook.ScanClass;
 import top.niunaijun.blackbox.fake.hook.MethodHook;
@@ -164,7 +167,7 @@ public class IConnectivityManagerProxy extends BinderInvocationStub {
     }
 
     
-    private static Object createLinkProperties() {
+    private static Object createLinkProperties(boolean hideDnsServers) {
         try {
             
             Class<?> linkPropertiesClass = Class.forName("android.net.LinkProperties");
@@ -175,10 +178,10 @@ public class IConnectivityManagerProxy extends BinderInvocationStub {
             
             java.util.List<java.net.InetAddress> dnsServers = new java.util.ArrayList<>();
             try {
-                dnsServers.add(java.net.InetAddress.getByName("8.8.8.8"));
-                dnsServers.add(java.net.InetAddress.getByName("8.8.4.4"));
-                
-                
+                if (!hideDnsServers) {
+                    dnsServers.add(java.net.InetAddress.getByName("8.8.8.8"));
+                    dnsServers.add(java.net.InetAddress.getByName("8.8.4.4"));
+                }
                 Method setDnsServersMethod = linkProperties.getClass().getMethod("setDnsServers", java.util.List.class);
                 setDnsServersMethod.invoke(linkProperties, dnsServers);
             } catch (Exception e) {
@@ -189,6 +192,26 @@ public class IConnectivityManagerProxy extends BinderInvocationStub {
         } catch (Exception e) {
             Slog.w(TAG, "Failed to create LinkProperties via reflection: " + e.getMessage());
             return null;
+        }
+    }
+
+    private static boolean hideDnsServers() {
+        return CloneNetworkIdentityStore.read(
+                BlackBoxCore.getContext(),
+                BActivityThread.getAppPackageName(),
+                BActivityThread.getUserId()
+        ).hideDnsServers;
+    }
+
+    private static boolean clearDnsServers(Object linkProperties) {
+        if (linkProperties == null) return false;
+        try {
+            Method setDnsServers = linkProperties.getClass().getMethod("setDnsServers", List.class);
+            setDnsServers.invoke(linkProperties, java.util.Collections.emptyList());
+            return true;
+        } catch (Exception error) {
+            Slog.w(TAG, "Could not hide DNS servers from LinkProperties: " + error.getMessage());
+            return false;
         }
     }
 
@@ -473,16 +496,21 @@ public class IConnectivityManagerProxy extends BinderInvocationStub {
     public static class GetLinkProperties extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            boolean hideDnsServers = IConnectivityManagerProxy.hideDnsServers();
             if (android.os.Build.VERSION.SDK_INT >= 21) {
                 try {
                     
                     Object result = method.invoke(who, args);
                     if (result != null) {
-                        return result;
+                        if (hideDnsServers) {
+                            if (IConnectivityManagerProxy.clearDnsServers(result)) return result;
+                        } else {
+                            return result;
+                        }
                     }
 
                     
-                    Object linkProperties = IConnectivityManagerProxy.createLinkProperties();
+                    Object linkProperties = IConnectivityManagerProxy.createLinkProperties(hideDnsServers);
                     
                     if (linkProperties != null) {
                         Slog.d(TAG, "Created LinkProperties with DNS configuration for sandboxed app (fallback)");
@@ -491,6 +519,10 @@ public class IConnectivityManagerProxy extends BinderInvocationStub {
                 } catch (Exception e) {
                     Slog.w(TAG, "Error creating LinkProperties: " + e.getMessage());
                 }
+            }
+            if (hideDnsServers) {
+                // A failed redaction must not fall back to the unfiltered host result.
+                return IConnectivityManagerProxy.createLinkProperties(true);
             }
             return method.invoke(who, args);
         }
@@ -523,6 +555,9 @@ public class IConnectivityManagerProxy extends BinderInvocationStub {
     public static class GetDnsServers extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            if (IConnectivityManagerProxy.hideDnsServers()) {
+                return java.util.Collections.emptyList();
+            }
             try {
                 
                 java.util.List<java.net.InetAddress> dnsServers = new java.util.ArrayList<>();

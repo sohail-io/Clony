@@ -19,8 +19,15 @@ import android.os.Bundle;
 import android.os.IBinder;
 import android.os.PersistableBundle;
 import android.os.UserHandle;
+import android.util.Log;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.Window;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 
 
 import top.niunaijun.blackbox.BlackBoxCore;
@@ -34,6 +41,9 @@ import top.niunaijun.blackbox.utils.VirtualRuntimeTrace;
 public class BaseInstrumentationDelegate extends Instrumentation {
 
     private static final String TAG = "BaseInstrumentationDelegate";
+    private static final String AVATAR_FLOW_TAG = "AvatarFlowTrace";
+    private static final String AVATAR_PICKER_ACTIVITY =
+            "com.ss.android.ugc.profile.avatar.choose.ProfileAvatarChoosePhotoActivity";
 
     protected Instrumentation mBaseInstrumentation;
 
@@ -382,6 +392,60 @@ public class BaseInstrumentationDelegate extends Instrumentation {
         for (AppLifecycleCallback appLifecycleCallback : BlackBoxCore.get().getAppLifecycleCallbacks()) {
             appLifecycleCallback.onActivityResumed(activity);
         }
+        installAvatarPickerTouchTrace(activity);
+    }
+
+    private void installAvatarPickerTouchTrace(Activity activity) {
+        if (activity == null || !AVATAR_PICKER_ACTIVITY.equals(activity.getClass().getName())) {
+            return;
+        }
+        try {
+            Window window = activity.getWindow();
+            Window.Callback callback = window == null ? null : window.getCallback();
+            if (callback == null) {
+                Log.w(AVATAR_FLOW_TAG, "picker resumed without a window callback");
+                return;
+            }
+            if (Proxy.isProxyClass(callback.getClass())
+                    && Proxy.getInvocationHandler(callback) instanceof AvatarPickerTouchTrace) {
+                return;
+            }
+            Window.Callback tracedCallback = (Window.Callback) Proxy.newProxyInstance(
+                    Window.Callback.class.getClassLoader(),
+                    new Class<?>[]{Window.Callback.class},
+                    new AvatarPickerTouchTrace(callback));
+            window.setCallback(tracedCallback);
+            Log.i(AVATAR_FLOW_TAG, "picker resumed; touch trace attached");
+        } catch (Throwable error) {
+            Log.w(AVATAR_FLOW_TAG, "could not attach picker touch trace", error);
+        }
+    }
+
+    private static final class AvatarPickerTouchTrace implements InvocationHandler {
+        private final Window.Callback delegate;
+
+        AvatarPickerTouchTrace(Window.Callback delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+            if ("dispatchTouchEvent".equals(method.getName()) && args != null && args.length > 0
+                    && args[0] instanceof MotionEvent) {
+                MotionEvent event = (MotionEvent) args[0];
+                int action = event.getActionMasked();
+                if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_UP
+                        || action == MotionEvent.ACTION_CANCEL) {
+                    Log.i(AVATAR_FLOW_TAG, "picker touch action=" + action
+                            + " x=" + event.getRawX() + " y=" + event.getRawY());
+                }
+            }
+            try {
+                return method.invoke(delegate, args);
+            } catch (InvocationTargetException error) {
+                throw error.getCause();
+            }
+        }
     }
 
     @Override
@@ -561,6 +625,11 @@ public class BaseInstrumentationDelegate extends Instrumentation {
             int result = BlackBoxCore.getBActivityManager().startActivityAms(
                     BActivityThread.getUserId(), virtualIntent, resolvedType, resultTo,
                     resultWho, requestCode, virtualIntent.getFlags(), options);
+            if (isAvatarFlowActivity(resolveInfo.activityInfo.name)) {
+                Log.i(AVATAR_FLOW_TAG, "dispatch target=" + resolveInfo.activityInfo.name
+                        + " requestCode=" + requestCode + " resultToPresent=" + (resultTo != null)
+                        + " userId=" + BActivityThread.getUserId() + " result=" + result);
+            }
             VirtualRuntimeTrace.activityDispatch("activity_dispatch",
                     resolveInfo.activityInfo.packageName, resolveInfo.activityInfo.name,
                     BActivityThread.getUserId(), result >= 0);
@@ -594,6 +663,11 @@ public class BaseInstrumentationDelegate extends Instrumentation {
     private Context getHostContext(Context fallback) {
         Context hostContext = BlackBoxCore.getContext();
         return hostContext != null ? hostContext : fallback;
+    }
+
+    private static boolean isAvatarFlowActivity(String activityName) {
+        return activityName != null && (activityName.contains(".profile.avatar.")
+                || activityName.contains(".profile.business.ur."));
     }
 
     private static Reflector invokeExecStartActivity(Object obj, Class<?>... args) throws NoSuchMethodException {

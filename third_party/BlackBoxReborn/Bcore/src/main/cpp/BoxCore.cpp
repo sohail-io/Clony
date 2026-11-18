@@ -106,8 +106,25 @@ void init(JNIEnv *env, jobject clazz, jint api_level) {
 void addIORule(JNIEnv *env, jclass clazz, jstring target_path,
                jstring relocate_path) {
     ALOGD("set addIORule");
-    IO::addRule(env->GetStringUTFChars(target_path, JNI_FALSE),
-                env->GetStringUTFChars(relocate_path, JNI_FALSE));
+    if (target_path == nullptr || relocate_path == nullptr) return;
+    const char *targetPath = env->GetStringUTFChars(target_path, nullptr);
+    const char *relocatePath = env->GetStringUTFChars(relocate_path, nullptr);
+    if (targetPath == nullptr || relocatePath == nullptr) {
+        if (targetPath != nullptr) env->ReleaseStringUTFChars(target_path, targetPath);
+        if (relocatePath != nullptr) env->ReleaseStringUTFChars(relocate_path, relocatePath);
+        return;
+    }
+    IO::addRule(targetPath, relocatePath);
+    env->ReleaseStringUTFChars(target_path, targetPath);
+    env->ReleaseStringUTFChars(relocate_path, relocatePath);
+}
+
+void removeIORule(JNIEnv *env, jclass clazz, jstring target_path) {
+    if (target_path == nullptr) return;
+    const char *targetPath = env->GetStringUTFChars(target_path, nullptr);
+    if (targetPath == nullptr) return;
+    IO::removeRule(targetPath);
+    env->ReleaseStringUTFChars(target_path, targetPath);
 }
 
 void enableIO(JNIEnv *env, jclass clazz) {
@@ -339,6 +356,7 @@ static JNINativeMethod gMethods[] = {
         {"disableResourceLoading", "()Z",                            (void *) disableResourceLoading},
         {"hideXposed",          "()V",                               (void *) hideXposed},
         {"addIORule",           "(Ljava/lang/String;Ljava/lang/String;)V", (void *) addIORule},
+        {"removeIORule",        "(Ljava/lang/String;)V", (void *) removeIORule},
         {"enableIO",            "()V",                               (void *) enableIO},
         {"init",                "(I)V",                              (void *) init},
         {"getArtMethodPtr",     "(Ljava/lang/reflect/Method;)J",     (void *) getArtMethodPtr},

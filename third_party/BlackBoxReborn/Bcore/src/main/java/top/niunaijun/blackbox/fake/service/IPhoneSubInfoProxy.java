@@ -113,4 +113,85 @@ public class IPhoneSubInfoProxy extends ClassInvocationStub {
             return null;
         }
     }
+
+    @ProxyMethod("getIccSerialNumber")
+    public static class GetIccSerialNumber extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            Object platformValue = method.invoke(who, args);
+            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+        }
+    }
+
+    @ProxyMethod("getIccSerialNumberForSubscriber")
+    public static class GetIccSerialNumberForSubscriber extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            Object platformValue = method.invoke(who, args);
+            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+        }
+    }
+
+    @ProxyMethod("getIccSerialNumberWithFeature")
+    public static class GetIccSerialNumberWithFeature extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            Object platformValue = method.invoke(who, args);
+            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+        }
+    }
+
+    @ProxyMethod("getLine1Number")
+    public static class GetLine1Number extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            Object platformValue = method.invoke(who, args);
+            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+        }
+    }
+
+    @ProxyMethod("getLine1NumberWithFeature")
+    public static class GetLine1NumberWithFeature extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            Object platformValue = method.invoke(who, args);
+            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+        }
+    }
+
+    @ProxyMethod("getMsisdn")
+    public static class GetMsisdn extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            Object platformValue = method.invoke(who, args);
+            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+        }
+    }
+
+    @ProxyMethod("getMsisdnForSubscriber")
+    public static class GetMsisdnForSubscriber extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            Object platformValue = method.invoke(who, args);
+            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+        }
+    }
+
+    @ProxyMethod("getSimSerialNumber")
+    public static class GetSimSerialNumber extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            Object platformValue = method.invoke(who, args);
+            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+        }
+    }
+
+    @ProxyMethod("getSimSerialNumberForSubscriber")
+    public static class GetSimSerialNumberForSubscriber extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            Object platformValue = method.invoke(who, args);
+            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+        }
+    }
 }

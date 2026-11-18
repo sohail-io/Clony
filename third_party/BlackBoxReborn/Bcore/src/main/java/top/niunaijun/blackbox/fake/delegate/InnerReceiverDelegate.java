@@ -13,6 +13,7 @@ import java.util.Map;
 import black.android.content.BRIIntentReceiver;
 import top.niunaijun.blackbox.BlackBoxCore;
 import top.niunaijun.blackbox.app.BActivityThread;
+import top.niunaijun.blackbox.fake.service.CloneHardwareIdentityHooks;
 import top.niunaijun.blackbox.proxy.record.ProxyBroadcastRecord;
 
 
@@ -65,6 +66,7 @@ public class InnerReceiverDelegate extends IIntentReceiver.Stub {
         } else {
             perIntent = intent;
         }
+        perIntent = CloneHardwareIdentityHooks.virtualizeBatteryIntent(perIntent);
         IIntentReceiver iIntentReceiver = mIntentReceiver.get();
         if (iIntentReceiver != null) {
             BRIIntentReceiver.get(iIntentReceiver).performReceive(perIntent, resultCode, data, extras, ordered, sticky, sendingUser);

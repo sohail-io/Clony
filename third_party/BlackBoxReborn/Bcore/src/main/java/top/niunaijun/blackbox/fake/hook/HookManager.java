@@ -9,6 +9,7 @@ import top.niunaijun.blackbox.BlackBoxCore;
 import top.niunaijun.blackbox.fake.delegate.AppInstrumentation;
 
 import top.niunaijun.blackbox.fake.service.HCallbackProxy;
+import top.niunaijun.blackbox.fake.service.BatteryPropertiesProxy;
 import top.niunaijun.blackbox.fake.service.IAccessibilityManagerProxy;
 import top.niunaijun.blackbox.fake.service.IAccountManagerProxy;
 import top.niunaijun.blackbox.fake.service.IActivityClientProxy;
@@ -160,6 +161,7 @@ public class HookManager {
             addInjector(new IPhoneSubInfoProxy());
             addInjector(new IMediaRouterServiceProxy());
             addInjector(new IPowerManagerProxy());
+            addInjector(new BatteryPropertiesProxy());
             addInjector(new IContextHubServiceProxy());
             
             addInjector(new IVibratorServiceProxy());

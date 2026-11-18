@@ -700,7 +700,8 @@ public class IActivityManagerProxy extends ClassInvocationStub {
                 args[flagsIndex] = flags;
             }
 
-            return method.invoke(who, args);
+            return CloneHardwareIdentityHooks.virtualizeBatteryIntent(
+                    (Intent) method.invoke(who, args));
         }
 
         public int getReceiverIndex() {
@@ -742,7 +743,8 @@ public class IActivityManagerProxy extends ClassInvocationStub {
             if (args[permissionIndex] != null) {
                 args[permissionIndex] = null;
             }
-            return method.invoke(who, args);
+            return CloneHardwareIdentityHooks.virtualizeBatteryIntent(
+                    (Intent) method.invoke(who, args));
         }
     }
 

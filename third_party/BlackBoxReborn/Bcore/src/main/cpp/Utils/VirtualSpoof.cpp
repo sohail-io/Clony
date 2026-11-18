@@ -1,6 +1,7 @@
 #include <sys/system_properties.h>
 #include <cstring>
 #include <cstdlib>
+#include <atomic>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -25,6 +26,61 @@ static char device_model[PROP_VALUE_MAX] = "Pixel 6";
 static pthread_mutex_t device_model_mutex = PTHREAD_MUTEX_INITIALIZER;
 static std::unordered_map<std::string, std::string> custom_build_props;
 static std::mutex custom_build_props_mutex;
+static std::atomic<bool> hide_cpu_gpu_info(false);
+static std::atomic<bool> hide_sim_operator_info(false);
+static std::atomic<bool> gl_get_string_hook_installed(false);
+static const unsigned char* (*orig_gl_get_string)(unsigned int name) = nullptr;
+
+static bool is_cpu_gpu_identity_property(const char *name) {
+    if (name == nullptr) return false;
+    return strcmp(name, "ro.hardware") == 0
+            || strcmp(name, "ro.boot.hardware") == 0
+            || strcmp(name, "ro.product.board") == 0
+            || strcmp(name, "ro.board.platform") == 0
+            || strcmp(name, "ro.hardware.egl") == 0
+            || strcmp(name, "ro.hardware.vulkan") == 0
+            || strcmp(name, "ro.hardware.gralloc") == 0
+            || strcmp(name, "ro.gfx.driver.0") == 0
+            || strncmp(name, "ro.soc.", 7) == 0
+            || strncmp(name, "ro.vendor.soc.", 14) == 0;
+}
+
+static bool is_sim_operator_identity_property(const char *name) {
+    if (name == nullptr) return false;
+    const char *identityProperties[] = {
+            "gsm.operator.alpha", "gsm.operator.numeric", "gsm.operator.iso-country",
+            "gsm.sim.operator.alpha", "gsm.sim.operator.numeric", "gsm.sim.operator.iso-country",
+            "ril.operator.alpha", "ril.operator.numeric", "ril.operator.iso-country",
+            nullptr
+    };
+    for (int index = 0; identityProperties[index] != nullptr; index++) {
+        size_t prefixLength = strlen(identityProperties[index]);
+        if (strncmp(name, identityProperties[index], prefixLength) == 0) return true;
+    }
+    return false;
+}
+
+static const unsigned char* my_gl_get_string(unsigned int name) {
+    if (hide_cpu_gpu_info.load()) {
+        static const unsigned char genericVendor[] = "Generic";
+        static const unsigned char genericRenderer[] = "OpenGL ES Renderer";
+        if (name == 0x1F00) return genericVendor;   // GL_VENDOR
+        if (name == 0x1F01) return genericRenderer; // GL_RENDERER
+    }
+    return orig_gl_get_string == nullptr ? nullptr : orig_gl_get_string(name);
+}
+
+static void install_gl_get_string_hook() {
+    if (gl_get_string_hook_installed.load()) return;
+    void *handle = dlopen("libGLESv2.so", RTLD_NOW);
+    if (handle == nullptr) return;
+    void *target = dlsym(handle, "glGetString");
+    if (target != nullptr && DobbyHook(target, (void*) my_gl_get_string,
+                                       (void**) &orig_gl_get_string) == 0) {
+        gl_get_string_hook_installed.store(true);
+        LOGD("Generic OpenGL vendor/renderer hook installed");
+    }
+}
 
 struct SpoofedProp {
     const char* key;
@@ -142,6 +198,35 @@ static bool set_build_string_field(JNIEnv *env, jclass buildClass,
     return success;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_top_niunaijun_blackbox_core_NativeCore_setHideCpuGpuInfo(
+        JNIEnv *env, jclass, jboolean hide) {
+    bool enabled = hide == JNI_TRUE;
+    hide_cpu_gpu_info.store(enabled);
+    if (!enabled) return JNI_TRUE;
+
+    jclass buildClass = env->FindClass("android/os/Build");
+    if (buildClass == nullptr || env->ExceptionCheck()) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return JNI_FALSE;
+    }
+    bool success = set_build_string_field(env, buildClass, "HARDWARE", "unknown");
+    success = set_build_string_field(env, buildClass, "BOARD", "unknown") && success;
+    // SOC_* were added in Android 12. Missing fields on older releases are expected.
+    set_build_string_field(env, buildClass, "SOC_MANUFACTURER", "unknown");
+    set_build_string_field(env, buildClass, "SOC_MODEL", "unknown");
+    env->DeleteLocalRef(buildClass);
+    install_gl_get_string_hook();
+    return success ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_top_niunaijun_blackbox_core_NativeCore_setHideSimOperatorInfo(
+        JNIEnv *, jclass, jboolean hide) {
+    hide_sim_operator_info.store(hide == JNI_TRUE);
+    return JNI_TRUE;
+}
+
 static bool set_version_string_field(JNIEnv *env, jclass versionClass,
                                      const char *fieldName, const char *value) {
     if (fieldName == nullptr || value == nullptr) return true;
@@ -177,6 +262,14 @@ static bool set_version_int_field(JNIEnv *env, jclass versionClass,
 }
 
 int my_system_property_get(const char *name, char *value) {
+    if (hide_sim_operator_info.load() && is_sim_operator_identity_property(name)) {
+        value[0] = '\0';
+        return 0;
+    }
+    if (hide_cpu_gpu_info.load() && is_cpu_gpu_identity_property(name)) {
+        strcpy(value, "unknown");
+        return 7;
+    }
     if (copy_custom_build_prop(name, value)) {
         LOGD("[build props] %s overridden", name);
         return static_cast<int>(strlen(value));
@@ -210,6 +303,14 @@ int my_system_property_read(const prop_info *info, char *name, char *value) {
     if (orig_system_property_read == nullptr) return 0;
     int length = orig_system_property_read(info, name, value);
     if (length >= 0 && name != nullptr && value != nullptr
+            && hide_sim_operator_info.load() && is_sim_operator_identity_property(name)) {
+        value[0] = '\0';
+        length = 0;
+    } else if (length >= 0 && name != nullptr && value != nullptr
+            && hide_cpu_gpu_info.load() && is_cpu_gpu_identity_property(name)) {
+        strcpy(value, "unknown");
+        length = 7;
+    } else if (length >= 0 && name != nullptr && value != nullptr
             && copy_custom_build_prop(name, value)) {
         length = static_cast<int>(strlen(value));
         LOGD("[build props] %s overridden", name);
@@ -234,6 +335,14 @@ static void property_read_callback_thunk(
         void *cookie, const char *name, const char *value, uint32_t serial) {
     PropertyReadCallbackContext *context =
             static_cast<PropertyReadCallbackContext *>(cookie);
+    if (hide_sim_operator_info.load() && is_sim_operator_identity_property(name)) {
+        context->callback(context->cookie, name, "", serial);
+        return;
+    }
+    if (hide_cpu_gpu_info.load() && is_cpu_gpu_identity_property(name)) {
+        context->callback(context->cookie, name, "unknown", serial);
+        return;
+    }
     char customValue[PROP_VALUE_MAX];
     if (copy_custom_build_prop(name, customValue)) {
         context->callback(context->cookie, name, customValue, serial);
