@@ -288,6 +288,15 @@ public class IOCore {
             File backingFilesDir = new File(backingAppDir, "files");
             FileUtils.mkdirs(backingCacheDir);
             FileUtils.mkdirs(backingFilesDir);
+            File avatarCropCacheDir = new File(backingCacheDir, "profileHeader");
+            if (isTikTokPackage(packageName)) {
+                FileUtils.mkdirs(avatarCropCacheDir);
+                android.util.Log.i(TAG, "profile-crop-cache prepared package=" + packageName
+                        + " userId=" + BlackBoxCore.getUserId()
+                        + " path=" + avatarCropCacheDir.getAbsolutePath()
+                        + " exists=" + avatarCropCacheDir.isDirectory()
+                        + " writable=" + avatarCropCacheDir.canWrite());
+            }
 
             File visibleAppDir = new File(
                     new File(Environment.getExternalStorageDirectory(), "Android/data"), packageName);

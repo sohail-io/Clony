@@ -192,7 +192,7 @@ internal fun CloneBuildPropsDialog(
                 modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text("Build props you set override Clony's virtual values for $appLabel. Gray values are examples; blank fields keep Clony's default.")
+                Text("Build props you set override TikViral's virtual values for $appLabel. Gray values are examples. Blank fields keep TikViral's default.")
                 val configuredSdk = props.sdkInt.toIntOrNull()
                 val deviceSdk = defaults.sdkInt.toIntOrNull()
                 if (configuredSdk != null && deviceSdk != null && configuredSdk != deviceSdk) {

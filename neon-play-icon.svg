@@ -1,0 +1,369 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="624" height="624" viewBox="88 88 624 624" role="img" aria-labelledby="icon-title">
+  <title id="icon-title">Neon play icon</title>
+  <defs>
+    <path id="short-bar" d="M452.5 278 V248.1 Q452.5 237.4 463.1 232.2 L482.1 222.8 C491.7 218 500.1 224.4 500.1 234.6 V315 Z"/>
+    <path id="bars" d="M508.3 318 V214.4 Q508.3 202.3 520.1 196.5 L548.6 183.9 C558.4 179.5 568.3 186.1 568.3 196.6 V329.4 C568.3 336.5 576.6 337 576.6 329.4 V172.1 Q576.6 157.8 590.1 151 L624.5 136.7 C636 131.5 648.2 139 648.2 151.6 V320.6 C652 377.6 616.9 419.4 556.7 450.6 C582.1 431.1 588.2 407.9 550.6 372 Z"/>
+    <path id="short-bar-edge" d="M452.5 262 V248.1 Q452.5 237.4 463.1 232.2 L482.1 222.8 C491.7 218 500.1 224.4 500.1 234.6 V295"/>
+    <path id="middle-bar-edge" d="M508.3 301 V214.4 Q508.3 202.3 520.1 196.5 L548.6 183.9 C558.4 179.5 568.3 186.1 568.3 196.6 V329.4 C568.3 336.5 576.6 337 576.6 329.4"/>
+    <path id="tall-bar-inner-edge" d="M576.6 329.4 V172.1 Q576.6 157.8 590.1 151 L624.5 136.7"/>
+    <path id="tall-bar-edge" d="M624.5 136.7 C636 131.5 648.2 139 648.2 151.6 V320.6"/>
+
+    <path id="lower-body" d="M276.7 325.5 V479.8 C276.7 516 293.7 538.8 326.5 547.6 C366 556.5 395.1 533.2 426 520.8 L597.7 505.4 C543.6 540.2 480.2 589 416.8 631.6 C382.3 654.8 352.5 668.2 315.7 661.9 C253.7 651.2 211.5 605.5 210 532.8 C206.3 459.5 233.7 378.4 276.7 325.5 Z"/>
+    <path id="lower-front" d="M276.7 325.5 V479.8 C276.5 541.9 308.6 607.8 362.4 628.8 C374.8 633.8 389 636.6 402.9 635.1 L416.8 631.6 C382.3 654.8 352.5 668.2 315.7 661.9 C253.7 651.2 211.5 605.5 210 532.8 C206.3 459.5 233.7 378.4 276.7 325.5 Z"/>
+    <path id="bottom-edge" d="M217.1 464.5 C210.9 487.4 208.7 511.8 210 532.8 C211.5 605.5 253.7 651.2 315.7 661.9 C352.5 668.2 382.3 654.8 416.8 631.6 C480.2 589 543.6 540.2 597.7 505.4"/>
+    <path id="left-inner-edge" d="M276.7 377 V479.8 C276.5 541.9 308.6 607.8 362.4 628.8 C374.8 633.8 389 636.6 402.9 635.1"/>
+
+    <path id="fold-shadow" d="M297 305 C253 330 204 423 199.5 491 C198.1 506 199.7 518 209.5 533 L222 473 L250 370 Z"/>
+    <path id="left-fold" d="M143.1 385.3 C136.7 355.7 162.2 318.6 201.3 297.6 C244.6 274.3 292.8 265.5 354.6 282.6 L348.3 289.2 C325.1 289.5 305.9 298.5 287.7 313.2 C263.2 334.3 239.5 371.7 220.1 409.2 C204.6 439.2 192.7 478.8 199.5 511.3 L208.3 532.8 C182.3 491.6 151.5 436.6 143.1 385.3 Z"/>
+    <path id="fold-edge" d="M208.3 532.8 C182.3 491.6 151.5 436.6 143.1 385.3"/>
+    <path id="fold-ridge" d="M199.5 511.3 C192.7 478.8 204.6 439.2 220.1 409.2 C239.5 371.7 263.2 334.3 287.7 313.2 C305.9 298.5 325.1 289.5 348.3 289.2"/>
+    <path id="upper-turn" d="M287.7 276.2 C351 262.8 407 294.3 485.8 322 C530.2 337.6 568 349.2 581.6 376.2 C594.5 401.8 584.6 429.7 561.9 444 C585.3 425.9 585.6 406.2 570.1 386.6 C553.6 365.7 514.6 350.3 471.7 331.5 C427.1 311.9 377.7 289.1 348.3 289.2 C325.1 289.5 305.9 298.5 287.7 313.2 Z"/>
+    <path id="upper-face" d="M143.1 385.3 C137.2 367.7 136.1 345.8 137.3 321.6 C137.3 233.2 179.4 178.7 249.5 170.4 C305.1 163.3 342.1 187.3 398 225.2 C444.8 256.8 488.2 286.3 536 322.1 C563.1 342.3 579.3 362.5 585 384.9 C575.3 357.4 539.1 344.3 502.2 330.8 C457.9 315.2 414.7 295.9 374.7 284.2 C329.1 270.8 282.9 269.2 247.7 281 C207.1 293.5 175.2 316.5 155.7 345.7 C146.2 359.9 141.4 372.3 143.1 385.3 Z"/>
+    <path id="crown-edge" d="M143.1 385.3 C137.2 367.7 136.1 345.8 137.3 321.6 C137.3 233.2 179.4 178.7 249.5 170.4 C305.1 163.3 342.1 187.3 398 225.2 C444.8 256.8 488.2 286.3 536 322.1 C563.1 342.3 579.3 362.5 585 384.9"/>
+    <path id="crown-ridge" d="M143.1 385.3 C141.4 372.3 146.2 359.9 155.7 345.7 C175.2 316.5 207.1 293.5 247.7 281 C282.9 269.2 329.1 270.8 374.7 284.2 C414.7 295.9 457.9 315.2 502.2 330.8 C539.1 344.3 575.3 357.4 585 384.9"/>
+
+    <path id="right-band" d="M648.2 320.6 C661.7 346.7 666.3 371.1 663.4 397.9 C658.5 451.2 633.4 484.9 598.6 506.7 C569.1 525.2 541.5 540.5 512.9 550.9 C461.9 569.6 385.9 567.1 333.7 550.9 C319.3 546.4 307.5 540.6 295.4 531.7 C320 551.3 346.7 553.2 372 542 C403.2 530.4 491.7 483.4 548.5 456.4 C609.7 427.2 630.1 403.2 642.7 366.3 C647.1 353.4 648.6 336 648.2 320.6 Z"/>
+    <path id="right-outer-edge" d="M648.2 320.6 C661.7 346.7 666.3 371.1 663.4 397.9 C658.5 451.2 633.4 484.9 598.6 506.7 C569.1 525.2 541.5 540.5 512.9 550.9 C461.9 569.6 385.9 567.1 333.7 550.9 C319.3 546.4 307.5 540.6 295.4 531.7"/>
+    <path id="right-inner-edge" d="M295.4 531.7 C320 551.3 346.7 553.2 372 542 C403.2 530.4 491.7 483.4 548.5 456.4 C609.7 427.2 630.1 403.2 642.7 366.3 C647.1 353.4 648.6 336 648.2 320.6"/>
+
+    <path id="play" d="M315.3 362.1 C315.3 338.5 337.6 325.2 358.3 336.8 L464.5 396.4 C486.2 408.6 486.5 431.1 465.1 443.7 L358.2 502.3 C336.8 514.2 315.3 503.8 315.3 481.3 Z"/>
+
+    <linearGradient id="short-bar-fill" x1="461" y1="227" x2="493" y2="304" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00e0ff"/>
+      <stop offset=".34" stop-color="#0088ff"/>
+      <stop offset=".72" stop-color="#2130f5"/>
+      <stop offset="1" stop-color="#5800ba"/>
+    </linearGradient>
+    <linearGradient id="middle-bar-fill" x1="516" y1="198" x2="586" y2="326" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00e7ff"/>
+      <stop offset=".24" stop-color="#009bff"/>
+      <stop offset=".46" stop-color="#3440f8"/>
+      <stop offset=".73" stop-color="#8107f4"/>
+      <stop offset="1" stop-color="#6a008c"/>
+    </linearGradient>
+    <linearGradient id="tall-bar-fill" x1="585" y1="155" x2="674" y2="255" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00deff"/>
+      <stop offset=".22" stop-color="#008bff"/>
+      <stop offset=".5" stop-color="#6332fb"/>
+      <stop offset=".73" stop-color="#c409f8"/>
+      <stop offset="1" stop-color="#fa00ef"/>
+    </linearGradient>
+    <linearGradient id="middle-bar-blend" x1="0" y1="278" x2="0" y2="341" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff"/>
+      <stop offset=".62" stop-color="#fff" stop-opacity=".74"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="bar-base-shade" x1="0" y1="257" x2="0" y2="452" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#360043" stop-opacity="0"/>
+      <stop offset=".33" stop-color="#360043" stop-opacity=".08"/>
+      <stop offset="1" stop-color="#280033" stop-opacity=".85"/>
+    </linearGradient>
+    <linearGradient id="short-edge-color" x1="460" y1="233" x2="502" y2="288" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#aaffff"/>
+      <stop offset=".44" stop-color="#13dbff"/>
+      <stop offset="1" stop-color="#6848ff" stop-opacity=".2"/>
+    </linearGradient>
+    <linearGradient id="middle-edge-color" x1="522" y1="197" x2="580" y2="276" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9dffff"/>
+      <stop offset=".37" stop-color="#22c9ff"/>
+      <stop offset=".78" stop-color="#d490ff" stop-opacity=".76"/>
+      <stop offset="1" stop-color="#f943ff" stop-opacity=".55"/>
+    </linearGradient>
+    <linearGradient id="tall-inner-edge-color" x1="0" y1="154" x2="0" y2="335" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#aaffff"/>
+      <stop offset=".22" stop-color="#4ee6ff"/>
+      <stop offset=".54" stop-color="#5693ff" stop-opacity=".67"/>
+      <stop offset="1" stop-color="#bd34fa" stop-opacity=".23"/>
+    </linearGradient>
+    <linearGradient id="tall-edge-color" x1="607" y1="148" x2="645" y2="238" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#aaffff"/>
+      <stop offset=".37" stop-color="#6ae8ff"/>
+      <stop offset=".67" stop-color="#ba8dff"/>
+      <stop offset="1" stop-color="#fff0ff"/>
+    </linearGradient>
+
+    <linearGradient id="lower-body-fill" x1="393" y1="632" x2="415" y2="542" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#054aff"/>
+      <stop offset=".25" stop-color="#1222d5"/>
+      <stop offset=".57" stop-color="#4322ec"/>
+      <stop offset=".74" stop-color="#9c25fa"/>
+      <stop offset="1" stop-color="#cb08fe"/>
+    </linearGradient>
+    <radialGradient id="lower-body-shade" cx="300" cy="561" r="130" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#001491"/>
+      <stop offset="1" stop-color="#001491" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="lower-front-fill" x1="208" y1="550" x2="386" y2="613" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00eaff"/>
+      <stop offset=".23" stop-color="#00b7fa"/>
+      <stop offset=".47" stop-color="#0099f9"/>
+      <stop offset=".72" stop-color="#0050ed"/>
+      <stop offset="1" stop-color="#0033e5"/>
+    </linearGradient>
+    <linearGradient id="lower-front-shade" x1="271" y1="343" x2="222" y2="523" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1100b9"/>
+      <stop offset=".46" stop-color="#0649f6" stop-opacity=".89"/>
+      <stop offset=".77" stop-color="#0674fa" stop-opacity=".36"/>
+      <stop offset="1" stop-color="#0674fa" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="lower-front-light" cx="0" cy="0" r="1" gradientTransform="translate(214 618) rotate(20) scale(114 68)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00f5ff" stop-opacity=".82"/>
+      <stop offset=".53" stop-color="#00caff" stop-opacity=".57"/>
+      <stop offset="1" stop-color="#00b3ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bottom-edge-color" x1="223" y1="516" x2="551" y2="553" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#56f9ff"/>
+      <stop offset=".15" stop-color="#c0ffff"/>
+      <stop offset=".52" stop-color="#72f7ff"/>
+      <stop offset=".73" stop-color="#5c90ff"/>
+      <stop offset="1" stop-color="#a255ff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="left-inner-edge-color" x1="0" y1="386" x2="0" y2="634" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3490ff" stop-opacity="0"/>
+      <stop offset=".42" stop-color="#40e7ff" stop-opacity=".72"/>
+      <stop offset="1" stop-color="#30dcff" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="left-fold-fill" x1="237" y1="301" x2="168" y2="499" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0a0b92"/>
+      <stop offset=".44" stop-color="#0937d7"/>
+      <stop offset=".73" stop-color="#0274f8"/>
+      <stop offset="1" stop-color="#47d6fe"/>
+    </linearGradient>
+    <radialGradient id="left-fold-light" cx="0" cy="0" r="1" gradientTransform="translate(234 419) rotate(30) scale(42 113)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f66cfa"/>
+      <stop offset=".38" stop-color="#ea59fc"/>
+      <stop offset=".66" stop-color="#8325f6" stop-opacity=".76"/>
+      <stop offset="1" stop-color="#8325f6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="left-fold-tip-light" cx="0" cy="0" r="1" gradientTransform="translate(202 508) rotate(20) scale(25 76)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ccf9ff"/>
+      <stop offset="1" stop-color="#ccf9ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="fold-edge-color" x1="143" y1="380" x2="208" y2="532" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#07dfff"/>
+      <stop offset=".73" stop-color="#72e8ff"/>
+      <stop offset="1" stop-color="#79d2ff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="fold-ridge-color" x1="0" y1="301" x2="0" y2="515" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9e24f4" stop-opacity=".12"/>
+      <stop offset=".32" stop-color="#f750f8" stop-opacity=".7"/>
+      <stop offset=".54" stop-color="#ffc2ff"/>
+      <stop offset=".73" stop-color="#ffefff"/>
+      <stop offset=".96" stop-color="#d5f6ff"/>
+      <stop offset="1" stop-color="#a1dfff" stop-opacity=".18"/>
+    </linearGradient>
+    <linearGradient id="upper-turn-fill" x1="326" y1="282" x2="583" y2="409" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3017d7"/>
+      <stop offset=".45" stop-color="#8500ea"/>
+      <stop offset=".69" stop-color="#a700cf"/>
+      <stop offset="1" stop-color="#480359"/>
+    </linearGradient>
+    <linearGradient id="upper-face-fill" x1="149" y1="170" x2="479" y2="338" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00edff"/>
+      <stop offset=".23" stop-color="#00a5fd"/>
+      <stop offset=".37" stop-color="#0867fc"/>
+      <stop offset=".48" stop-color="#4235fc"/>
+      <stop offset=".61" stop-color="#8d2af8"/>
+      <stop offset=".75" stop-color="#d721f9"/>
+      <stop offset=".94" stop-color="#fb03f7"/>
+    </linearGradient>
+    <radialGradient id="upper-cyan-light" cx="0" cy="0" r="1" gradientTransform="translate(225 161) rotate(16) scale(153 65)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00f6ff"/>
+      <stop offset=".56" stop-color="#00d6ff" stop-opacity=".88"/>
+      <stop offset="1" stop-color="#00a9ff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="upper-left-light" cx="0" cy="0" r="1" gradientTransform="translate(137 342) rotate(-67) scale(146 88)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00f7ff"/>
+      <stop offset=".69" stop-color="#00d5ff" stop-opacity=".7"/>
+      <stop offset="1" stop-color="#00d5ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="crown-edge-color" x1="139" y1="0" x2="573" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#83ffff"/>
+      <stop offset=".25" stop-color="#c0ffff"/>
+      <stop offset=".5" stop-color="#95f3ff"/>
+      <stop offset=".68" stop-color="#c2a9ff"/>
+      <stop offset=".86" stop-color="#fa7aff" stop-opacity=".7"/>
+      <stop offset="1" stop-color="#ff36f4" stop-opacity=".16"/>
+    </linearGradient>
+    <linearGradient id="crown-ridge-color" x1="143" y1="0" x2="585" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4bffff" stop-opacity="0"/>
+      <stop offset=".25" stop-color="#9eeaff" stop-opacity=".7"/>
+      <stop offset=".38" stop-color="#e5daff"/>
+      <stop offset=".62" stop-color="#ff9afa"/>
+      <stop offset=".84" stop-color="#ff5ff4" stop-opacity=".61"/>
+      <stop offset="1" stop-color="#fc18e9" stop-opacity=".22"/>
+    </linearGradient>
+
+    <linearGradient id="right-band-fill" x1="343" y1="553" x2="649" y2="400" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0520db"/>
+      <stop offset=".22" stop-color="#1816dc"/>
+      <stop offset=".43" stop-color="#5908ee"/>
+      <stop offset=".59" stop-color="#b404f8"/>
+      <stop offset=".77" stop-color="#fa00fa"/>
+      <stop offset=".88" stop-color="#ff0af9"/>
+      <stop offset="1" stop-color="#ff42f5"/>
+    </linearGradient>
+    <radialGradient id="right-band-light" cx="0" cy="0" r="1" gradientTransform="translate(651 333) rotate(104) scale(101 45)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffc5ff"/>
+      <stop offset=".65" stop-color="#ff79fd" stop-opacity=".56"/>
+      <stop offset="1" stop-color="#ff57f8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="right-outer-color" x1="296" y1="560" x2="645" y2="425" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9275ff" stop-opacity=".12"/>
+      <stop offset=".34" stop-color="#b676ff" stop-opacity=".52"/>
+      <stop offset=".57" stop-color="#ff92ff"/>
+      <stop offset=".82" stop-color="#ffdbff"/>
+      <stop offset="1" stop-color="#ffeaff"/>
+    </linearGradient>
+    <linearGradient id="right-inner-color" x1="296" y1="560" x2="645" y2="425" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2264ff" stop-opacity=".11"/>
+      <stop offset=".22" stop-color="#3a97ff" stop-opacity=".46"/>
+      <stop offset=".55" stop-color="#b6a6ff"/>
+      <stop offset=".76" stop-color="#ffd3ff"/>
+      <stop offset="1" stop-color="#fff2ff"/>
+    </linearGradient>
+
+    <linearGradient id="play-fill" x1="326" y1="352" x2="412" y2="470" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00e7ff"/>
+      <stop offset=".3" stop-color="#009cfc"/>
+      <stop offset=".49" stop-color="#0855fa"/>
+      <stop offset=".7" stop-color="#5a1ef8"/>
+      <stop offset="1" stop-color="#e408fa"/>
+    </linearGradient>
+    <radialGradient id="play-pink-light" cx="477" cy="426" r="107" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff00fc"/>
+      <stop offset=".48" stop-color="#fa00fc" stop-opacity=".71"/>
+      <stop offset="1" stop-color="#fa00fc" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="play-edge-color" x1="315" y1="363" x2="450" y2="460" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#98ffff"/>
+      <stop offset=".32" stop-color="#72e9ff"/>
+      <stop offset=".49" stop-color="#527dff"/>
+      <stop offset=".73" stop-color="#f27aff"/>
+      <stop offset="1" stop-color="#ffeeff"/>
+    </linearGradient>
+
+    <linearGradient id="crown-halo" x1="160" y1="0" x2="565" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00d9ff"/>
+      <stop offset=".5" stop-color="#00beff"/>
+      <stop offset=".71" stop-color="#743bff"/>
+      <stop offset="1" stop-color="#f000ed" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="bottom-halo" x1="220" y1="525" x2="550" y2="580" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00caff"/>
+      <stop offset=".57" stop-color="#00ccff"/>
+      <stop offset=".84" stop-color="#3e52ff" stop-opacity=".56"/>
+      <stop offset="1" stop-color="#8833ff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="band-halo" x1="330" y1="557" x2="645" y2="448" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#513cff" stop-opacity="0"/>
+      <stop offset=".56" stop-color="#f600f8" stop-opacity=".48"/>
+      <stop offset="1" stop-color="#ff00d7"/>
+    </linearGradient>
+    <linearGradient id="play-halo" x1="322" y1="363" x2="443" y2="449" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00dcff"/>
+      <stop offset=".43" stop-color="#0473ff"/>
+      <stop offset=".69" stop-color="#8a18fc"/>
+      <stop offset="1" stop-color="#fc00f2"/>
+    </linearGradient>
+    <linearGradient id="tall-halo" x1="591" y1="141" x2="652" y2="245" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00d9ff"/>
+      <stop offset=".48" stop-color="#156aff"/>
+      <stop offset="1" stop-color="#fd00df"/>
+    </linearGradient>
+
+    <linearGradient id="fold-join-blend" x1="306" y1="0" x2="348.3" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <mask id="fold-join-mask" x="132" y="265" width="228" height="273" maskUnits="userSpaceOnUse">
+      <rect x="132" y="265" width="228" height="273" fill="url(#fold-join-blend)"/>
+    </mask>
+    <clipPath id="bar-clip"><use href="#bars"/></clipPath>
+    <mask id="middle-bar-mask" x="500" y="175" width="80" height="170" maskUnits="userSpaceOnUse">
+      <rect x="500" y="175" width="69" height="170" fill="url(#middle-bar-blend)"/>
+    </mask>
+    <filter id="glow-wide" x="85" y="85" width="630" height="630" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+    <filter id="glow-soft" x="85" y="85" width="630" height="630" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="3.2"/>
+    </filter>
+    <filter id="glow-close" x="85" y="85" width="630" height="630" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="1.15"/>
+    </filter>
+    <g id="outer-glow" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <use href="#short-bar-edge" stroke="#00b7ff"/>
+      <use href="#middle-bar-edge" stroke="url(#tall-halo)"/>
+      <use href="#tall-bar-inner-edge" stroke="url(#tall-inner-edge-color)"/>
+      <use href="#tall-bar-edge" stroke="url(#tall-halo)"/>
+      <use href="#crown-edge" stroke="url(#crown-halo)"/>
+      <use href="#fold-edge" stroke="url(#fold-edge-color)"/>
+      <use href="#bottom-edge" stroke="url(#bottom-halo)"/>
+      <use href="#right-outer-edge" stroke="url(#band-halo)"/>
+      <use href="#play" stroke="url(#play-halo)"/>
+    </g>
+    <g id="rim-detail" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <use href="#crown-edge" stroke="url(#crown-edge-color)"/>
+      <use href="#fold-edge" stroke="url(#fold-edge-color)"/>
+      <use href="#bottom-edge" stroke="url(#bottom-edge-color)"/>
+      <use href="#right-outer-edge" stroke="url(#right-outer-color)"/>
+      <use href="#right-inner-edge" stroke="url(#right-inner-color)"/>
+      <use href="#play" stroke="url(#play-edge-color)"/>
+    </g>
+    <g id="fold-detail" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <use href="#fold-ridge" stroke="url(#fold-ridge-color)"/>
+      <use href="#crown-ridge" stroke="url(#crown-ridge-color)"/>
+      <use href="#left-inner-edge" stroke="url(#left-inner-edge-color)"/>
+    </g>
+  </defs>
+
+  <!-- Wide, saturated light behind the mark. -->
+  <use href="#outer-glow" stroke-width="15" filter="url(#glow-wide)" opacity=".90"/>
+  <use href="#outer-glow" stroke-width="9" filter="url(#glow-soft)" opacity=".72"/>
+
+  <!-- Three rising bars and the folded ribbon. -->
+  <use href="#short-bar" fill="url(#short-bar-fill)"/>
+  <g clip-path="url(#bar-clip)">
+    <use href="#bars" fill="url(#tall-bar-fill)"/>
+    <use href="#bars" fill="url(#middle-bar-fill)" mask="url(#middle-bar-mask)"/>
+    <use href="#bars" fill="url(#bar-base-shade)"/>
+  </g>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <use href="#short-bar-edge" stroke="url(#short-edge-color)" stroke-width="5.3" opacity=".74" filter="url(#glow-soft)"/>
+    <use href="#middle-bar-edge" stroke="url(#middle-edge-color)" stroke-width="5.1" opacity=".84" filter="url(#glow-soft)"/>
+    <use href="#tall-bar-inner-edge" stroke="url(#tall-inner-edge-color)" stroke-width="4.2" opacity=".67" filter="url(#glow-soft)"/>
+    <use href="#tall-bar-edge" stroke="url(#tall-halo)" stroke-width="6.9" opacity=".93" filter="url(#glow-soft)"/>
+    <use href="#short-bar-edge" stroke="url(#short-edge-color)" stroke-width="1.25"/>
+    <use href="#middle-bar-edge" stroke="url(#middle-edge-color)" stroke-width="1.25"/>
+    <use href="#tall-bar-inner-edge" stroke="url(#tall-inner-edge-color)" stroke-width="1.5"/>
+    <use href="#tall-bar-edge" stroke="url(#tall-edge-color)" stroke-width="1.6"/>
+  </g>
+  <use href="#fold-shadow" fill="#04134f"/>
+  <use href="#lower-body" fill="url(#lower-body-fill)"/>
+  <use href="#lower-body" fill="url(#lower-body-shade)"/>
+  <use href="#lower-front" fill="url(#lower-front-fill)"/>
+  <use href="#lower-front" fill="url(#lower-front-shade)"/>
+  <use href="#lower-front" fill="url(#lower-front-light)"/>
+  <use href="#upper-turn" fill="url(#upper-turn-fill)"/>
+  <g mask="url(#fold-join-mask)">
+    <use href="#left-fold" fill="url(#left-fold-fill)"/>
+    <use href="#left-fold" fill="url(#left-fold-light)"/>
+    <use href="#left-fold" fill="url(#left-fold-tip-light)"/>
+  </g>
+  <use href="#upper-face" fill="url(#upper-face-fill)"/>
+  <use href="#upper-face" fill="url(#upper-cyan-light)"/>
+  <use href="#upper-face" fill="url(#upper-left-light)"/>
+  <use href="#right-band" fill="url(#right-band-fill)"/>
+  <use href="#right-band" fill="url(#right-band-light)"/>
+  <use href="#play" fill="url(#play-fill)"/>
+  <use href="#play" fill="url(#play-pink-light)"/>
+
+  <!-- Tight highlights on the edges and at the folds. -->
+  <use href="#fold-detail" stroke-width="7.5" opacity=".62" filter="url(#glow-soft)"/>
+  <use href="#fold-detail" stroke-width="1.35" opacity=".95"/>
+  <use href="#rim-detail" stroke-width="5.3" opacity=".57" filter="url(#glow-soft)"/>
+  <use href="#rim-detail" stroke-width="3" opacity=".82" filter="url(#glow-close)"/>
+  <use href="#rim-detail" stroke-width="1.45"/>
+</svg>

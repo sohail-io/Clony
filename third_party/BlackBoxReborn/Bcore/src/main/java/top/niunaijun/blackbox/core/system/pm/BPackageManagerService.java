@@ -831,7 +831,8 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
                     | PackageManager.GET_INSTRUMENTATION
                     | PackageManager.GET_META_DATA
                     | PackageManager.GET_CONFIGURATIONS
-                    | PackageManager.GET_SIGNING_CERTIFICATES;
+                    | PackageManager.GET_SIGNING_CERTIFICATES
+                    | PackageManager.GET_SHARED_LIBRARY_FILES;
             PackageManager packageManager = BlackBoxCore.getPackageManager();
             PackageInfo packageInfo = packageManager.getPackageInfo(packageName, packageFlags);
             ApplicationInfo applicationInfo = packageInfo.applicationInfo;

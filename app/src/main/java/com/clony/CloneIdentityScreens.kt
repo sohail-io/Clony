@@ -200,7 +200,7 @@ internal fun NetworkRadioIdentityScreen(
         item {
             IdentityToggleCard(
                 title = "Change IMEI / IMSI",
-                description = "Use private values for this copy. When off, IMEI and IMSI are hidden; Clony never returns the phone's real hardware IDs.",
+                description = "Use private values for this copy. When off, IMEI and IMSI are hidden. TikViral never returns the phone's real hardware IDs.",
                 checked = settings.changeTelephonyIds,
                 onCheckedChange = { onSettingsChange(settings.copy(changeTelephonyIds = it)) }
             )
@@ -209,7 +209,7 @@ internal fun NetworkRadioIdentityScreen(
         item {
             IdentityToggleCard(
                 title = "Change Wi-Fi MAC address",
-                description = "Give each copy a stable, private Wi-Fi MAC. When off, Clony returns Android's redacted MAC value.",
+                description = "Give each copy a stable, private Wi-Fi MAC. When off, TikViral returns Android's redacted MAC value.",
                 checked = settings.changeWifiMac,
                 onCheckedChange = { onSettingsChange(settings.copy(changeWifiMac = it)) }
             )
@@ -218,7 +218,7 @@ internal fun NetworkRadioIdentityScreen(
         item {
             IdentityStatusCard(
                 title = "Change Bluetooth MAC address",
-                description = "Clony does not currently replace Bluetooth addresses.",
+                description = "TikViral does not currently replace Bluetooth addresses.",
                 status = "Unavailable",
                 active = false
             )
@@ -226,7 +226,7 @@ internal fun NetworkRadioIdentityScreen(
         item {
             IdentityStatusCard(
                 title = "Change Ethernet MAC address",
-                description = "Clony does not currently replace Ethernet MAC addresses.",
+                description = "TikViral does not currently replace Ethernet MAC addresses.",
                 status = "Unavailable",
                 active = false
             )

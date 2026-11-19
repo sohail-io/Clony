@@ -249,6 +249,32 @@ public class IConnectivityManagerProxy extends BinderInvocationStub {
         }
     }
 
+    @ProxyMethod("getNetworkInfoForUid")
+    public static class GetNetworkInfoForUid extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            try {
+                return method.invoke(who, args);
+            } catch (InvocationTargetException error) {
+                if (!(error.getCause() instanceof SecurityException)) {
+                    throw error;
+                }
+
+                // Android 17 restricts this UID-specific API to privileged callers. A
+                // virtual app shares Clony's host UID, so fall back to the host process's
+                // ordinary active-network state instead of letting the denial crash Chrome.
+                try {
+                    Method activeNetworkInfo = who.getClass().getMethod("getActiveNetworkInfo");
+                    return activeNetworkInfo.invoke(who);
+                } catch (Throwable fallbackError) {
+                    Slog.w(TAG, "Could not read active network state after UID-specific lookup was denied: "
+                            + fallbackError.getMessage());
+                    return null;
+                }
+            }
+        }
+    }
+
     @ProxyMethod("getAllNetworkInfo")
     public static class GetAllNetworkInfo extends MethodHook {
         @Override

@@ -3,6 +3,7 @@ package com.clony
 import android.content.Context
 import android.content.pm.LauncherApps
 import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Process
 import android.util.Log
@@ -68,13 +69,25 @@ internal object ClonePackageUpdater {
             val installedUsers = userIds.distinct().sorted()
             val sampleUser = installedUsers.firstOrNull() ?: return@mapNotNull null
             runCatching {
-                val hostInfo = packageManager.getPackageInfo(clonedPackage, 0)
+                val packageFlags = PackageManager.GET_SHARED_LIBRARY_FILES
+                val hostInfo = packageManager.getPackageInfo(clonedPackage, packageFlags)
                 val cloneInfo = BlackBoxCore.getBPackageManager()
-                    .getPackageInfo(clonedPackage, 0, sampleUser)
+                    .getPackageInfo(clonedPackage, packageFlags, sampleUser)
                     ?: return@mapNotNull null
                 val hostVersionCode = packageVersionCode(hostInfo)
                 val cloneVersionCode = packageVersionCode(cloneInfo)
-                if (hostVersionCode <= cloneVersionCode) {
+                val hostSharedLibraryApks = hostInfo.applicationInfo?.sharedLibraryFiles
+                    .orEmpty()
+                    .filter { it.endsWith(".apk", ignoreCase = true) }
+                    .toSet()
+                val cloneSharedLibraryApks = cloneInfo.applicationInfo?.sharedLibraryFiles
+                    .orEmpty()
+                    .toSet()
+                val missingSharedLibraryApks = hostSharedLibraryApks - cloneSharedLibraryApks
+                val packageVersionChanged = hostVersionCode > cloneVersionCode
+                val sharedLibraryMetadataMissing =
+                    hostVersionCode == cloneVersionCode && missingSharedLibraryApks.isNotEmpty()
+                if (!packageVersionChanged && !sharedLibraryMetadataMissing) {
                     Log.v(TAG, "clone current package=" + clonedPackage +
                         " hostVersion=" + hostVersionCode +
                         " cloneVersion=" + cloneVersionCode +
@@ -84,7 +97,8 @@ internal object ClonePackageUpdater {
                 Log.w(TAG, "clone outdated package=" + clonedPackage +
                     " hostVersion=" + hostVersionCode +
                     " cloneVersion=" + cloneVersionCode +
-                    " users=" + installedUsers)
+                    " users=" + installedUsers +
+                    " missingSharedLibraryApks=" + missingSharedLibraryApks)
                 val label = hostInfo.applicationInfo?.loadLabel(packageManager)?.toString()
                     ?.takeIf(String::isNotBlank) ?: clonedPackage
                 ClonePackageUpdate(

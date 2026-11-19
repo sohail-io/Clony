@@ -69,7 +69,11 @@ private fun proxyProbeFailureMessage(type: Int, result: Int): String {
 }
 
 @Composable
-internal fun CloneProxyDialog(app: AppTile, onDismiss: () -> Unit, onSaved: () -> Unit) {
+internal fun CloneProxyDialog(
+    app: AppTile,
+    onDismiss: () -> Unit,
+    onSaved: () -> Unit
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val userId = app.virtualUserId
@@ -81,6 +85,8 @@ internal fun CloneProxyDialog(app: AppTile, onDismiss: () -> Unit, onSaved: () -
     var loaded by remember { mutableStateOf(false) }
 
     LaunchedEffect(app.packageName, userId) {
+        loaded = false
+        message = null
         if (userId == null) {
             message = "Proxy settings are available for cloned apps only."
             busy = false
@@ -103,7 +109,7 @@ internal fun CloneProxyDialog(app: AppTile, onDismiss: () -> Unit, onSaved: () -
 
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
-        title = { Text("Network · ${app.displayName}") },
+        title = { Text("Proxy / network · ${app.displayName}") },
         text = {
             Column(
                 modifier = Modifier.heightIn(max = 560.dp).verticalScroll(rememberScrollState()),

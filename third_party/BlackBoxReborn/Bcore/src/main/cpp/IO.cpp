@@ -93,6 +93,28 @@ const char *IO::redirectPath(const char *__path) {
     return __path;
 }
 
+std::string IO::redirectPathCopy(const char *__path) {
+    if (__path == nullptr) return std::string();
+    if (strstr(__path, "/blackbox/") != nullptr) return std::string(__path);
+
+    for (const IO::RelocateInfo &info : relocate_rule) {
+        if (strstr(__path, info.targetPath.c_str()) == nullptr ||
+            info.targetPath.empty() || info.targetPath == info.relocatePath) {
+            continue;
+        }
+
+        std::string result(__path);
+        size_t position = 0;
+        while ((position = result.find(info.targetPath, position)) != std::string::npos) {
+            result.replace(position, info.targetPath.size(), info.relocatePath);
+            position += info.relocatePath.size();
+        }
+        return result;
+    }
+
+    return std::string(__path);
+}
+
 jstring IO::redirectPath(JNIEnv *env, jstring path) {
 
 

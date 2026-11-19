@@ -79,7 +79,7 @@ with tempfile.TemporaryDirectory(prefix="clony-launchers-") as temporary:
         values = work / "res" / "values"
         values.mkdir(parents=True)
         (values / "strings.xml").write_text(
-            f'<resources><string name="app_name">Clony Copy {slot}</string></resources>'
+            f'<resources><string name="app_name">TikViral Copy {slot}</string></resources>'
         )
         manifest = work / "AndroidManifest.xml"
         manifest.write_text(f'''<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.clony.launcher.copy{slot}" android:versionCode="1" android:versionName="1.0">
@@ -113,7 +113,7 @@ with tempfile.TemporaryDirectory(prefix="clony-launchers-") as temporary:
             text=True,
         )
         assert f"package: name='com.clony.launcher.copy{slot}'" in result
-        assert f"application: label='Clony Copy {slot}'" in result
+        assert f"application: label='TikViral Copy {slot}'" in result
         assert "launchable-activity: name='com.clony.launcher.LauncherActivity'" in result
         return slot
 

@@ -44,7 +44,7 @@ internal fun CloneFingerprintDialog(
                         Text(
                             when {
                                 !valid -> "Use printable characters with no spaces."
-                                normalized.isEmpty() -> "Leave empty to use Clony's default."
+                                normalized.isEmpty() -> "Leave empty to use TikViral's default."
                                 else -> "${normalized.length}/${CloneFingerprintStore.MAX_LENGTH} characters"
                             }
                         )

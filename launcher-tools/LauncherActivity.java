@@ -20,7 +20,7 @@ public final class LauncherActivity extends Activity {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(intent);
         } catch (Exception error) {
-            Toast.makeText(this, "Install or update Clony to open this copy.", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Install or update TikViral to open this copy.", Toast.LENGTH_LONG).show();
         } finally {
             finish();
         }

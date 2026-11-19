@@ -83,7 +83,7 @@ class CloneShortcutActivity : ComponentActivity() {
             } catch (error: Throwable) {
                 Log.e(SHORTCUT_TRACE_TAG, "shortcut stage=permission_preflight_failed package=" +
                     packageName + " userId=" + userId, error)
-                toast(error.message?.takeIf(String::isNotBlank) ?: "Clony couldn't open this copy.")
+                toast(error.message?.takeIf(String::isNotBlank) ?: "TikViral couldn't open this copy.")
                 finishShortcutActivity()
             }
         }
@@ -199,7 +199,7 @@ class CloneShortcutActivity : ComponentActivity() {
                 }
                 traceShortcut("launch_result launched=" + launched, packageName, userId)
                 if (!launched) {
-                    toast("Clony couldn't start this copy of $packageName.")
+                    toast("TikViral couldn't start this copy of $packageName.")
                 } else {
                     val cloneTaskForegrounded = withContext(Dispatchers.IO) {
                         val activityManager = BlackBoxCore.getBActivityManager()
@@ -221,7 +221,7 @@ class CloneShortcutActivity : ComponentActivity() {
             } catch (error: Throwable) {
                 Log.e(SHORTCUT_TRACE_TAG, "shortcut stage=exception package=" + packageName +
                     " userId=" + userId, error)
-                toast(error.message?.takeIf(String::isNotBlank) ?: "Clony couldn't open this copy.")
+                toast(error.message?.takeIf(String::isNotBlank) ?: "TikViral couldn't open this copy.")
             } finally {
                 traceShortcut("finish", packageName, userId)
                 finishShortcutActivity()

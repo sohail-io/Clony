@@ -1,19 +1,19 @@
-# Clony
+# TikViral
 
-Clony creates local app copies using an embedded Android virtualization
+TikViral creates local app copies using an embedded Android virtualization
 runtime. Each clone is installed into its own virtual user and starts with
 separate app data; it does not copy the original app's private data. Cloning
 and launching happen on the device without a cloning backend.
 
 Copies keep the source app's icon and use numbered names such as **TikTok 1**
-and **TikTok 2** in Clony and on the Android home screen. Each shortcut opens
-its assigned copy through Clony. The original app is still running inside
+and **TikTok 2** in TikViral and on the Android home screen. Each shortcut opens
+its assigned copy through TikViral. The original app is still running inside
 BlackBox, so the shortcut does not create a separate Android security sandbox
 or change the guest app's package identity.
 
 ## Current limits
 
-- Clony supports up to 10 virtual copies per source app. Home-screen shortcuts
+- TikViral supports up to 10 virtual copies per source app. Home-screen shortcuts
   use the source app's icon and a numbered name. Older copies may still have
   the generic companion launcher installed by previous versions.
 - The runtime imports the installed base APK and split APKs. App compatibility
@@ -27,7 +27,7 @@ or change the guest app's package identity.
   but API 36 runtime compatibility still needs on-device verification. The
   readiness badge can say "ready" even though clone hooks are unavailable. See the
   [on-device investigation](reverse-engineering/clone-app/README.md#clony-on-device-runtime-test).
-- Clony does not rewrite Play Integrity responses.
+- TikViral does not rewrite Play Integrity responses.
 - The host target SDK is 28 to support this runtime's hidden-API reflection.
   The build is intended for local research and sideloading, not Play publishing.
 

@@ -74,6 +74,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.colorResource
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -168,7 +171,7 @@ class MainActivity : ComponentActivity() {
             advanceLauncherQueue()
         } else {
             launcherQueue.complete(false)
-            showInfo("Copies were created. Allow installs from Clony, then choose Install launcher to add their app icons.")
+            showInfo("Copies were created. Allow installs from TikViral, then choose Install launcher to add their app icons.")
         }
     }
     private val launcherInstallResult = registerForActivityResult(
@@ -739,7 +742,7 @@ class MainActivity : ComponentActivity() {
                     BlackBoxCore.get().stopPackage(tile.packageName, userId)
                 }
                 showInfo(
-                    if (value == null) "${tile.displayName} will use Clony's default device fingerprint the next time it starts."
+                    if (value == null) "${tile.displayName} will use TikViral's default device fingerprint the next time it starts."
                     else "Saved the device fingerprint for ${tile.displayName}. It will be used the next time the copy starts."
                 )
             } catch (error: Throwable) {
@@ -1041,6 +1044,11 @@ class MainActivity : ComponentActivity() {
                                 CloneHardwareIdentityStore.delete(this@MainActivity, tile.packageName, createdUserId)
                             }
                             runCatching {
+                                top.niunaijun.blackbox.core.network.CloneProxyStore.delete(
+                                    this@MainActivity, tile.packageName, createdUserId
+                                )
+                            }
+                            runCatching {
                                 ClonePackageNameStore.delete(this@MainActivity, tile.packageName, createdUserId)
                             }
                             runCatching { runtime.deleteUser(createdUserId) }
@@ -1123,7 +1131,7 @@ class MainActivity : ComponentActivity() {
     private fun copyMessage() {
         val report = messageState.value ?: return
         getSystemService(ClipboardManager::class.java)
-            .setPrimaryClip(ClipData.newPlainText("Clony message", report))
+            .setPrimaryClip(ClipData.newPlainText("TikViral message", report))
         Toast.makeText(this, "Message copied", Toast.LENGTH_SHORT).show()
     }
 }
@@ -1155,7 +1163,6 @@ private fun ClonyHomeRedesigned(
     var countSheetApp by remember { mutableStateOf<AppTile?>(null) }
     var deleteApp by remember { mutableStateOf<AppTile?>(null) }
     var networkApp by remember { mutableStateOf<AppTile?>(null) }
-    var proxyPickerSource by remember { mutableStateOf<AppTile?>(null) }
     var showBuildProps by remember { mutableStateOf(false) }
     var cloneFeatureScreen by remember { mutableStateOf(CloneFeatureScreen.CLONE_SETTINGS) }
     var cloneCount by remember { mutableStateOf(1) }
@@ -1177,7 +1184,6 @@ private fun ClonyHomeRedesigned(
     }
     val occupiedNames = remember(apps) { apps.flatMap { listOfNotNull(it.packageName, it.customPackageName) }.toSet() }
     val detailApp = systemApps.firstOrNull { it.packageName == detailPackage }
-    val detailClones = detailApp?.let { app -> clones.filter { it.packageName == app.packageName } }.orEmpty()
     val matchingApps = remember(systemApps, query) {
         if (query.isBlank()) systemApps else systemApps.filter {
             it.label.contains(query, true) || it.packageName.contains(query, true)
@@ -1333,13 +1339,16 @@ private fun ClonyHomeRedesigned(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (detailApp == null) {
-                    Box(
-                        Modifier.size(42.dp).clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.primary),
-                        contentAlignment = Alignment.Center
-                    ) { Text("C", color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Black) }
+                    Image(
+                        painter = painterResource(R.drawable.tikviral_logo),
+                        contentDescription = null,
+                        modifier = Modifier.size(42.dp).clip(RoundedCornerShape(14.dp))
+                            .background(colorResource(R.color.tikviral_logo_background))
+                            .padding(2.dp)
+                    )
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("CLONY", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                        Text(stringResource(R.string.app_name), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
                         Text("Private app copies", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     TextButton(onClick = onRefresh) { Text("Refresh") }
@@ -1413,7 +1422,7 @@ private fun ClonyHomeRedesigned(
                         item {
                             DetailActionCard(
                                 "Build props",
-                                if (buildProps.overrideCount == 0) "Clony defaults will be used"
+                                if (buildProps.overrideCount == 0) "TikViral defaults will be used"
                                 else "${buildProps.overrideCount} custom values for new copies",
                                 "Edit"
                             ) { showBuildProps = true }
@@ -1424,24 +1433,6 @@ private fun ClonyHomeRedesigned(
                                 description = "Device, network and radio identity options",
                                 value = "Open"
                             ) { cloneFeatureScreen = CloneFeatureScreen.IDENTITY_OPERATIONS }
-                        }
-                        item {
-                            DetailActionCard(
-                                title = "Proxy / network",
-                                description = editingClone?.let { "Configure the connection for " + it.displayName } ?: when (detailClones.size) {
-                                    0 -> "Create a clone to configure its connection"
-                                    1 -> "Configure the connection for 1 clone"
-                                    else -> "Configure the connection for " + detailClones.size + " clones"
-                                },
-                                value = if (editingClone != null || detailClones.size == 1) "Edit" else detailClones.size.toString(),
-                                enabled = editingClone != null || detailClones.isNotEmpty()
-                            ) {
-                                when {
-                                    editingClone != null -> networkApp = editingClone
-                                    detailClones.size == 1 -> networkApp = detailClones.first()
-                                    detailClones.size > 1 -> proxyPickerSource = detailApp
-                                }
-                            }
                         }
                         item { Text(detailApp.packageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                     }
@@ -1546,6 +1537,7 @@ private fun ClonyHomeRedesigned(
                                                 systemApps.firstOrNull { it.packageName == app.packageName }
                                                     ?.let { openSystemApp(it, app) }
                                             },
+                                            onProxy = { networkApp = app },
                                             onPin = { onPinClone(app) },
                                             onDelete = { deleteApp = app }
                                         )
@@ -1607,23 +1599,12 @@ private fun ClonyHomeRedesigned(
             title = { Text("Delete ${app.displayName}?") },
             text = {
                 Text(
-                    "This permanently removes the copy and its app data. Clony disables its pinned Home screen shortcut. " +
+                    "This permanently removes the copy and its app data. TikViral disables its pinned Home screen shortcut. " +
                         "If this copy has a separate launcher app icon, Android will ask whether to uninstall it."
                 )
             },
             confirmButton = { TextButton(onClick = { onDeleteClone(app); deleteApp = null }) { Text("Delete Clone", color = MaterialTheme.colorScheme.error) } },
             dismissButton = { TextButton(onClick = { deleteApp = null }) { Text("Cancel") } }
-        )
-    }
-    proxyPickerSource?.let { app ->
-        CloneProxyPickerSheet(
-            sourceApp = app,
-            clones = detailClones,
-            onDismiss = { proxyPickerSource = null },
-            onSelect = { selectedClone ->
-                proxyPickerSource = null
-                networkApp = selectedClone
-            }
         )
     }
     networkApp?.let { app ->
@@ -1632,57 +1613,6 @@ private fun ClonyHomeRedesigned(
             onDismiss = { networkApp = null },
             onSaved = { networkApp = null; onRefresh() }
         )
-    }
-}
-
-@Composable
-@OptIn(ExperimentalMaterial3Api::class)
-private fun CloneProxyPickerSheet(
-    sourceApp: AppTile,
-    clones: List<AppTile>,
-    onDismiss: () -> Unit,
-    onSelect: (AppTile) -> Unit
-) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(
-            Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text("Choose a clone", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            Text(
-                "Proxy settings are saved separately for each " + sourceApp.label + " clone.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            clones.forEach { clone ->
-                Card(
-                    onClick = { onSelect(clone) },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(18.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
-                ) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Image(clone.icon, null, Modifier.size(42.dp).clip(RoundedCornerShape(13.dp)))
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(clone.displayName, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                clone.customPackageName ?: clone.packageName,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-                }
-            }
-            Spacer(Modifier.size(12.dp))
-        }
     }
 }
 
@@ -1887,6 +1817,7 @@ private fun AppGridTile(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onEditClone: () -> Unit,
+    onProxy: () -> Unit,
     onPin: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -1919,6 +1850,13 @@ private fun AppGridTile(
                     onClick = {
                         actionsExpanded = false
                         onEditClone()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Proxy / network") },
+                    onClick = {
+                        actionsExpanded = false
+                        onProxy()
                     }
                 )
                 DropdownMenuItem(

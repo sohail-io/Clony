@@ -30,6 +30,31 @@ import static android.content.pm.PackageManager.GET_META_DATA;
 public class ActivityManagerCommonProxy {
     public static final String TAG = "CommonStub";
 
+    @ProxyMethod("addApplicationStartInfoCompleteListener")
+    public static class AddApplicationStartInfoCompleteListener extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) {
+            // Virtual apps run under Clony's host UID, which cannot use this system-only
+            // startup telemetry callback. The callback is informational and isn't needed
+            // to launch the virtual app.
+            Slog.d(TAG, "Skipping application start info listener for virtual package "
+                    + BActivityThread.getAppPackageName());
+            return null;
+        }
+    }
+
+    @ProxyMethod("removeApplicationStartInfoCompleteListener")
+    public static class RemoveApplicationStartInfoCompleteListener extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) {
+            // Pair the suppressed registration above so ActivityManager doesn't forward a
+            // later unregister call with the same host UID.
+            Slog.d(TAG, "Skipping application start info listener removal for virtual package "
+                    + BActivityThread.getAppPackageName());
+            return null;
+        }
+    }
+
     @ProxyMethod("isBackgroundRestricted")
     public static class IsBackgroundRestricted extends MethodHook {
         @Override

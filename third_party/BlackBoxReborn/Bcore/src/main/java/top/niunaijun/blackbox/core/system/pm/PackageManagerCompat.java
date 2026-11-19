@@ -17,7 +17,7 @@ import android.content.res.AssetManager;
 import android.content.res.Resources;
 import android.os.Build;
 
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Set;
 
 import black.android.content.pm.BRApplicationInfoL;
@@ -350,7 +350,16 @@ public class PackageManagerCompat {
     private static void fixJar(ApplicationInfo info) {
         String APACHE_LEGACY_JAR = "/system/framework/org.apache.http.legacy.boot.jar";
         String APACHE_LEGACY_JAR_Q = "/system/framework/org.apache.http.legacy.jar";
-        Set<String> sharedLibraryFileList = new HashSet<>();
+        // Keep libraries reported by Android (for example TrichromeLibrary.apk).
+        // Chrome uses the shared library APK as an asset source for ICU data.
+        Set<String> sharedLibraryFileList = new LinkedHashSet<>();
+        if (info.sharedLibraryFiles != null) {
+            for (String sharedLibraryFile : info.sharedLibraryFiles) {
+                if (sharedLibraryFile != null && !sharedLibraryFile.isEmpty()) {
+                    sharedLibraryFileList.add(sharedLibraryFile);
+                }
+            }
+        }
         if (BuildCompat.isQ()) {
             if (!FileUtils.isExist(APACHE_LEGACY_JAR_Q)) {
                 sharedLibraryFileList.add(APACHE_LEGACY_JAR);
