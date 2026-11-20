@@ -7,8 +7,6 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.SystemClock
 import android.util.Log
-import android.view.View
-import android.view.ViewGroup
 import android.webkit.WebView
 import top.niunaijun.blackbox.BlackBoxCore
 import top.niunaijun.blackbox.app.BActivityThread
@@ -16,60 +14,52 @@ import top.niunaijun.blackbox.app.configuration.AppLifecycleCallback
 import top.niunaijun.blackbox.app.configuration.ClientConfiguration
 import top.niunaijun.blackbox.utils.VirtualRuntimeTrace
 import top.niunaijun.blackbox.utils.SimpleCrashFix
+import java.security.MessageDigest
 
 private const val TRACE_TAG = "ClonyTrace"
 
 /**
- * Keeps WebViews inside virtual apps in sync with the real host network state.
- * The guest connectivity service can be virtualized, so use Clony's host
- * ConnectivityManager and update WebViews after the guest creates them.
+ * Virtual apps run in Clony-owned processes, so Android otherwise gives all of
+ * them the same WebView data/cache directory. WebView requires a distinct
+ * directory for each process. Set the suffix before the virtual Application is
+ * created (and before it can construct a WebView).
  */
-private object VirtualWebViewNetworkCompat {
+private object VirtualWebViewDataDirectoryCompat {
     private const val TAG = "ClonyWebView"
+    private const val HEX = "0123456789abcdef"
 
-    fun update(activity: Activity) {
-        val hostContext = BlackBoxCore.getContext() ?: return
-        val networkAvailable = hasHostInternet(hostContext)
-        val webViews = ArrayList<WebView>()
+    fun configure(packageName: String?, processName: String?, userId: Int, context: Context?) {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.P) return
+        if (packageName.isNullOrBlank()) return
 
-        fun collect(view: View) {
-            if (view is WebView) {
-                webViews.add(view)
-            } else if (view is ViewGroup) {
-                for (index in 0 until view.childCount) {
-                    collect(view.getChildAt(index))
-                }
+        val identity = "$packageName\u0000${processName.orEmpty()}"
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(identity.toByteArray(Charsets.UTF_8))
+        val suffix = buildString {
+            append("clony_u").append(userId).append('_')
+            digest.take(12).forEach { value ->
+                val byte = value.toInt() and 0xff
+                append(HEX[byte ushr 4])
+                append(HEX[byte and 0x0f])
             }
         }
 
-        runCatching { collect(activity.window.decorView) }
-            .onFailure { error ->
-                Log.w(TAG, "Could not inspect virtual activity views", error)
-                return
-            }
+        runCatching { WebView.setDataDirectorySuffix(suffix) }
+            .onSuccess { Log.i(TAG, "Set WebView data directory for $packageName process=${processName.orEmpty()} user=$userId") }
+            .onFailure { error -> Log.w(TAG, "Could not set WebView data directory for $packageName", error) }
 
-        webViews.forEach { webView ->
-            runCatching { webView.setNetworkAvailable(networkAvailable) }
-                .onFailure { error ->
-                    Log.w(TAG, "Could not update virtual WebView network state", error)
-                }
-        }
-        if (webViews.isNotEmpty()) {
-            Log.i(TAG, "Updated ${webViews.size} virtual WebView(s); networkAvailable=$networkAvailable")
-        }
-    }
-
-    private fun hasHostInternet(context: Context): Boolean {
-        val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE)
-                as? ConnectivityManager ?: return false
-        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-            val network = connectivity.activeNetwork ?: return false
-            val capabilities = connectivity.getNetworkCapabilities(network) ?: return false
-            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-        } else {
-            @Suppress("DEPRECATION")
-            connectivity.activeNetworkInfo?.isConnected == true
-        }
+        runCatching {
+            val connectivity = context?.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            val network = connectivity?.activeNetwork
+            val capabilities = network?.let(connectivity::getNetworkCapabilities)
+            val dnsServers = network?.let { connectivity?.getLinkProperties(it)?.dnsServers }
+            Log.i(
+                TAG,
+                "Clone network package=$packageName active=${network != null} " +
+                    "internet=${capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)} " +
+                    "dnsCount=${dnsServers?.size ?: -1}"
+            )
+        }.onFailure { error -> Log.w(TAG, "Could not inspect clone network for $packageName", error) }
     }
 }
 
@@ -122,6 +112,7 @@ class ClonyApplication : Application() {
                 context: Context?,
                 userId: Int
             ) {
+                VirtualWebViewDataDirectoryCompat.configure(packageName, processName, userId, context)
                 Log.i(TRACE_TAG, "virtualApp stage=beforeCreate package=" + packageName +
                     " process=" + processName + " userId=" + userId)
             }
@@ -137,12 +128,11 @@ class ClonyApplication : Application() {
                 application?.registerActivityLifecycleCallbacks(object :
                     Application.ActivityLifecycleCallbacks {
                     override fun onActivityCreated(activity: Activity, state: android.os.Bundle?) {
-                        VirtualWebViewNetworkCompat.update(activity)
+                        Unit
                     }
                     override fun onActivityStarted(activity: Activity) = Unit
                     override fun onActivityResumed(activity: Activity) {
                         SimpleCrashFix.onVirtualActivityResumed(activity)
-                        VirtualWebViewNetworkCompat.update(activity)
                     }
                     override fun onActivityPaused(activity: Activity) {
                         SimpleCrashFix.onVirtualActivityPaused(activity)
