@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 
 /** Stores per-copy network identity controls and defaults for future copies. */
 public final class CloneNetworkIdentityStore {
+    public static final String SIM_PROFILE_TEST_PACKAGE = "dubai.blinds.curtains";
     private static final String PREFERENCES = "clone_network_identity_v1";
     private static final String KEY_PREFIX = "network_identity:";
 
@@ -12,7 +13,7 @@ public final class CloneNetworkIdentityStore {
     }
 
     public static Options defaults() {
-        return new Options(true, false, true, false, false);
+        return new Options(true, false, true, false, false, false, "", "", "", "");
     }
 
     public static Options readTemplate(Context context, String packageName) {
@@ -25,7 +26,12 @@ public final class CloneNetworkIdentityStore {
                 preferences.getBoolean(prefix + "hideSimOperatorInfo", defaults.hideSimOperatorInfo),
                 preferences.getBoolean(prefix + "changeWifiMac", defaults.changeWifiMac),
                 preferences.getBoolean(prefix + "hideWifiInfo", defaults.hideWifiInfo),
-                preferences.getBoolean(prefix + "hideDnsServers", defaults.hideDnsServers)
+                preferences.getBoolean(prefix + "hideDnsServers", defaults.hideDnsServers),
+                preferences.getBoolean(prefix + "simulateSimProfile", defaults.simulateSimProfile),
+                preferences.getString(prefix + "simPhoneNumber", defaults.simPhoneNumber),
+                preferences.getString(prefix + "simCarrierName", defaults.simCarrierName),
+                preferences.getString(prefix + "simCountryIso", defaults.simCountryIso),
+                preferences.getString(prefix + "simOperatorCode", defaults.simOperatorCode)
         );
     }
 
@@ -39,7 +45,12 @@ public final class CloneNetworkIdentityStore {
                 preferences.getBoolean(prefix + "hideSimOperatorInfo", template.hideSimOperatorInfo),
                 preferences.getBoolean(prefix + "changeWifiMac", template.changeWifiMac),
                 preferences.getBoolean(prefix + "hideWifiInfo", template.hideWifiInfo),
-                preferences.getBoolean(prefix + "hideDnsServers", template.hideDnsServers)
+                preferences.getBoolean(prefix + "hideDnsServers", template.hideDnsServers),
+                preferences.getBoolean(prefix + "simulateSimProfile", template.simulateSimProfile),
+                preferences.getString(prefix + "simPhoneNumber", template.simPhoneNumber),
+                preferences.getString(prefix + "simCarrierName", template.simCarrierName),
+                preferences.getString(prefix + "simCountryIso", template.simCountryIso),
+                preferences.getString(prefix + "simOperatorCode", template.simOperatorCode)
         );
     }
 
@@ -62,6 +73,11 @@ public final class CloneNetworkIdentityStore {
                 .remove(prefix + "changeWifiMac")
                 .remove(prefix + "hideWifiInfo")
                 .remove(prefix + "hideDnsServers")
+                .remove(prefix + "simulateSimProfile")
+                .remove(prefix + "simPhoneNumber")
+                .remove(prefix + "simCarrierName")
+                .remove(prefix + "simCountryIso")
+                .remove(prefix + "simOperatorCode")
                 .commit();
     }
 
@@ -79,7 +95,12 @@ public final class CloneNetworkIdentityStore {
                 .putBoolean(prefix + "hideSimOperatorInfo", options.hideSimOperatorInfo)
                 .putBoolean(prefix + "changeWifiMac", options.changeWifiMac)
                 .putBoolean(prefix + "hideWifiInfo", options.hideWifiInfo)
-                .putBoolean(prefix + "hideDnsServers", options.hideDnsServers);
+                .putBoolean(prefix + "hideDnsServers", options.hideDnsServers)
+                .putBoolean(prefix + "simulateSimProfile", options.simulateSimProfile)
+                .putString(prefix + "simPhoneNumber", options.simPhoneNumber)
+                .putString(prefix + "simCarrierName", options.simCarrierName)
+                .putString(prefix + "simCountryIso", options.simCountryIso)
+                .putString(prefix + "simOperatorCode", options.simOperatorCode);
     }
 
     private static String cloneKey(String packageName, int userId) {
@@ -100,19 +121,34 @@ public final class CloneNetworkIdentityStore {
         public final boolean changeWifiMac;
         public final boolean hideWifiInfo;
         public final boolean hideDnsServers;
+        public final boolean simulateSimProfile;
+        public final String simPhoneNumber;
+        public final String simCarrierName;
+        public final String simCountryIso;
+        public final String simOperatorCode;
 
         public Options(
                 boolean changeTelephonyIds,
                 boolean hideSimOperatorInfo,
                 boolean changeWifiMac,
                 boolean hideWifiInfo,
-                boolean hideDnsServers
+                boolean hideDnsServers,
+                boolean simulateSimProfile,
+                String simPhoneNumber,
+                String simCarrierName,
+                String simCountryIso,
+                String simOperatorCode
         ) {
             this.changeTelephonyIds = changeTelephonyIds;
             this.hideSimOperatorInfo = hideSimOperatorInfo;
             this.changeWifiMac = changeWifiMac;
             this.hideWifiInfo = hideWifiInfo;
             this.hideDnsServers = hideDnsServers;
+            this.simulateSimProfile = simulateSimProfile;
+            this.simPhoneNumber = simPhoneNumber == null ? "" : simPhoneNumber;
+            this.simCarrierName = simCarrierName == null ? "" : simCarrierName;
+            this.simCountryIso = simCountryIso == null ? "" : simCountryIso;
+            this.simOperatorCode = simOperatorCode == null ? "" : simOperatorCode;
         }
     }
 }

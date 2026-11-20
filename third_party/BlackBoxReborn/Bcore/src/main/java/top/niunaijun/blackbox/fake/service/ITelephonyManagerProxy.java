@@ -148,9 +148,44 @@ public class ITelephonyManagerProxy extends BinderInvocationStub {
     }
 
     static Object hideSimOperatorString(Object who, Method method, Object[] args) throws Throwable {
-        Object platformValue = method.invoke(who, args);
-        return hideSimOperatorInfo() && platformValue instanceof String ? "" : platformValue;
+        CloneNetworkIdentityStore.Options options = identityOptions();
+        if (isDubaiCurtainsTestProfileEnabled(options)) {
+            String methodName = method.getName().toLowerCase(java.util.Locale.ROOT);
+            String configured = null;
+            if (methodName.contains("countryiso")) {
+                configured = options.simCountryIso;
+            } else if (methodName.contains("operatorname")) {
+                configured = options.simCarrierName;
+            } else if (methodName.contains("operatornumeric")
+                    || methodName.contains("simoperator")
+                    || methodName.contains("networkoperator")) {
+                configured = options.simOperatorCode;
+            }
+            return configured == null ? "" : configured.trim();
+        }
+        if (options.hideSimOperatorInfo) return "";
+        return method.invoke(who, args);
     }
+
+    static String simulatedPhoneNumber() {
+        CloneNetworkIdentityStore.Options options = identityOptions();
+        if (!isDubaiCurtainsTestProfileEnabled(options)) return null;
+        String number = options.simPhoneNumber == null ? "" : options.simPhoneNumber.trim();
+        return number.isEmpty() ? null : number;
+    }
+
+    static boolean isDubaiCurtainsTestProfileEnabled() {
+        return isDubaiCurtainsTestProfileEnabled(identityOptions());
+    }
+    private static boolean isDubaiCurtainsTestProfileEnabled(CloneNetworkIdentityStore.Options options) {
+        return options != null && options.simulateSimProfile;
+    }
+//    private static boolean isDubaiCurtainsTestProfileEnabled(CloneNetworkIdentityStore.Options options) {
+//        return options != null
+//                && options.simulateSimProfile
+//                && CloneNetworkIdentityStore.SIM_PROFILE_TEST_PACKAGE.equals(BActivityThread.getAppPackageName()
+//        );
+//    }
 
     @ProxyMethod("getCellLocation")
     public static class GetCellLocation extends MethodHook {

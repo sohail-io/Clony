@@ -62,6 +62,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -100,6 +101,7 @@ import top.niunaijun.blackbox.core.CloneHardwareIdentityStore
 import top.niunaijun.blackbox.core.CloneFingerprintStore
 import top.niunaijun.blackbox.core.CloneNetworkIdentityStore
 import top.niunaijun.blackbox.fake.service.VirtualDeviceIdentity
+import top.niunaijun.blackbox.fake.frameworks.BAccountManager
 import java.util.Locale
 import java.util.UUID
 
@@ -190,6 +192,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val appsState = mutableStateOf<List<AppTile>>(emptyList())
+    private val containerAccountsState = mutableStateOf<Map<Int, List<String>>>(emptyMap())
     private val runtimeReadyState = mutableStateOf(false)
     private val messageState = mutableStateOf<String?>(null)
     private val busyPackageState = mutableStateOf<String?>(null)
@@ -232,6 +235,7 @@ class MainActivity : ComponentActivity() {
             ClonyTheme {
                 ClonyHomeRedesigned(
                     apps = appsState.value,
+                    containerAccounts = containerAccountsState.value,
                     message = messageState.value,
                     messageIsError = messageIsErrorState.value,
                     busyPackageName = busyPackageState.value,
@@ -246,6 +250,7 @@ class MainActivity : ComponentActivity() {
                     onRefresh = ::refreshApps,
                     onOpenClone = ::openClone,
                     onCreateCopies = ::createCopies,
+                    onInstallIntoContainer = ::installIntoContainer,
                     onSaveBuildPropsTemplate = ::saveBuildPropsTemplate,
                     onSaveNetworkIdentitySettings = ::saveNetworkIdentitySettings,
                     onSaveHardwareIdentitySettings = ::saveHardwareIdentitySettings,
@@ -417,11 +422,17 @@ class MainActivity : ComponentActivity() {
     private fun refreshApps() {
         refreshJob?.cancel()
         refreshJob = lifecycleScope.launch {
-            val (tiles, runtimeReady) = withContext(Dispatchers.IO) {
+            val (tiles, runtimeReady, containerAccounts) = withContext(Dispatchers.IO) {
                 val launcherApps = getSystemService(LauncherApps::class.java)
                 val runtime = BlackBoxCore.get()
                 val runtimeReady = runCatching { runtime.isServicesAvailable() }.getOrDefault(false)
                 val virtualUsers = runCatching { runtime.getUsers().orEmpty() }.getOrDefault(emptyList())
+                val containerAccounts = virtualUsers.associate { user ->
+                    user.id to runCatching {
+                        BAccountManager.get().getAccountsAsUser("com.google", user.id)
+                            .orEmpty().map { it.name }
+                    }.getOrDefault(emptyList())
+                }
                 val tiles = runCatching {
                     launcherApps.getActivityList(null, Process.myUserHandle())
                         .groupBy { it.applicationInfo.packageName }
@@ -476,10 +487,11 @@ class MainActivity : ComponentActivity() {
                         }
                         .sortedBy { it.label.lowercase(Locale.ROOT) }
                 }.getOrDefault(emptyList())
-                tiles to runtimeReady
+                Triple(tiles, runtimeReady, containerAccounts)
             }
             appsState.value = tiles
             runtimeReadyState.value = runtimeReady
+            containerAccountsState.value = containerAccounts
         }
     }
 
@@ -644,9 +656,18 @@ class MainActivity : ComponentActivity() {
                     Log.i(TRACE_TAG, "clone_delete stage=stop_begin package=${tile.packageName} userId=$userId")
                     runtime.stopPackage(tile.packageName, userId)
                     Log.i(TRACE_TAG, "clone_delete stage=stop_complete package=${tile.packageName} userId=$userId")
-                    Log.i(TRACE_TAG, "clone_delete stage=delete_user_begin package=${tile.packageName} userId=$userId")
-                    runtime.deleteUser(userId)
-                    Log.i(TRACE_TAG, "clone_delete stage=delete_user_complete package=${tile.packageName} userId=$userId")
+                    val otherPackagesRemain = appsState.value.any {
+                        it.isCloned && it.virtualUserId == userId && it.packageName != tile.packageName
+                    }
+                    if (otherPackagesRemain) {
+                        Log.i(TRACE_TAG, "clone_delete stage=uninstall_package_begin package=${tile.packageName} userId=$userId")
+                        runtime.uninstallPackageAsUser(tile.packageName, userId)
+                        Log.i(TRACE_TAG, "clone_delete stage=uninstall_package_complete package=${tile.packageName} userId=$userId")
+                    } else {
+                        Log.i(TRACE_TAG, "clone_delete stage=delete_user_begin package=${tile.packageName} userId=$userId")
+                        runtime.deleteUser(userId)
+                        Log.i(TRACE_TAG, "clone_delete stage=delete_user_complete package=${tile.packageName} userId=$userId")
+                    }
                     runCatching {
                         top.niunaijun.blackbox.core.network.CloneProxyStore.delete(
                             this@MainActivity, tile.packageName, userId
@@ -1079,6 +1100,71 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun installIntoContainer(tile: AppTile, userId: Int) {
+        if (busyPackageState.value != null) return
+        val copyCount = appsState.value.count { it.packageName == tile.packageName && it.isCloned }
+        if (copyCount >= MAX_COPIES_PER_APP) {
+            showError("${tile.label} already has the maximum of $MAX_COPIES_PER_APP copies.", null)
+            return
+        }
+        val occupiedPackageNames = appsState.value.flatMap { app ->
+            listOfNotNull(app.packageName, app.customPackageName)
+        }.toSet()
+        val proposedPackageName = packageNameDrafts(
+            tile,
+            1,
+            occupiedPackageNames,
+            CloneCopyNameStore.nextNumber(this, tile.packageName)
+        ).first()
+        showProgress(tile.packageName, "Adding ${tile.label} to container $userId…")
+        lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    val runtime = BlackBoxCore.get()
+                    if (runtime.getUsers().orEmpty().none { it.id == userId }) {
+                        error("Container $userId no longer exists.")
+                    }
+                    if (runtime.isInstalled(tile.packageName, userId)) {
+                        error("${tile.label} is already in this container.")
+                    }
+                    if (VirtualDeviceIdentity.createAndroidId(this@MainActivity, tile.packageName, userId) == null) {
+                        error("Couldn't prepare private app identity for ${tile.label}.")
+                    }
+                    if (!VirtualDeviceIdentity.initializeTelephonyIds(this@MainActivity, tile.packageName, userId)) {
+                        error("Couldn't prepare private radio identity for ${tile.label}.")
+                    }
+                    if (!CloneBuildPropsStore.write(this@MainActivity, tile.packageName, userId,
+                            CloneBuildPropsStore.readTemplate(this@MainActivity, tile.packageName))) {
+                        error("Couldn't save build properties for ${tile.label}.")
+                    }
+                    if (!CloneNetworkIdentityStore.write(this@MainActivity, tile.packageName, userId,
+                            CloneNetworkIdentityStore.readTemplate(this@MainActivity, tile.packageName))) {
+                        error("Couldn't save network settings for ${tile.label}.")
+                    }
+                    if (!CloneHardwareIdentityStore.write(this@MainActivity, tile.packageName, userId,
+                            CloneHardwareIdentityStore.readTemplate(this@MainActivity, tile.packageName))) {
+                        error("Couldn't save hardware settings for ${tile.label}.")
+                    }
+                    val install = runtime.installInstalledPackageAsUser(tile.packageName, userId)
+                        ?: error("The virtual package service stopped while adding ${tile.label}.")
+                    if (!install.success) error(install.msg?.takeIf(String::isNotBlank)
+                        ?: "The runtime couldn't add ${tile.label} to this container.")
+                    if (!ClonePackageNameStore.write(this@MainActivity, tile.packageName, userId,
+                            proposedPackageName)) {
+                        runtime.uninstallPackageAsUser(tile.packageName, userId)
+                        error("Couldn't save the app's private container name.")
+                    }
+                    runtime.installGoogleSignInServices(userId)
+                }
+                refreshApps()
+                showInfo("Added ${tile.label} to container $userId. Its app data is separate from other apps in that container.")
+            } catch (error: Throwable) {
+                showError(error.message?.takeIf(String::isNotBlank) ?: "Couldn't add ${tile.label} to this container.", null)
+                refreshApps()
+            }
+        }
+    }
+
     private fun retryClone(packageName: String) {
         val tile = appsState.value.firstOrNull { it.packageName == packageName } ?: return
         messageState.value = null
@@ -1140,6 +1226,7 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 private fun ClonyHomeRedesigned(
     apps: List<AppTile>,
+    containerAccounts: Map<Int, List<String>>,
     message: String?,
     messageIsError: Boolean,
     busyPackageName: String?,
@@ -1150,6 +1237,7 @@ private fun ClonyHomeRedesigned(
     onRefresh: () -> Unit,
     onOpenClone: (AppTile) -> Unit,
     onCreateCopies: (AppTile, List<String>, CloneBuildProps, CloneNetworkIdentitySettings, CloneHardwareIdentitySettings) -> Unit,
+    onInstallIntoContainer: (AppTile, Int) -> Unit,
     onSaveBuildPropsTemplate: (AppTile, CloneBuildProps) -> Unit,
     onSaveNetworkIdentitySettings: (AppTile, Int?, CloneNetworkIdentitySettings) -> Unit,
     onSaveHardwareIdentitySettings: (AppTile, Int?, CloneHardwareIdentitySettings) -> Unit,
@@ -1161,6 +1249,7 @@ private fun ClonyHomeRedesigned(
     var editingClone by remember { mutableStateOf<AppTile?>(null) }
     var query by remember { mutableStateOf("") }
     var countSheetApp by remember { mutableStateOf<AppTile?>(null) }
+    var containerChoiceApp by remember { mutableStateOf<AppTile?>(null) }
     var deleteApp by remember { mutableStateOf<AppTile?>(null) }
     var networkApp by remember { mutableStateOf<AppTile?>(null) }
     var showBuildProps by remember { mutableStateOf(false) }
@@ -1171,6 +1260,7 @@ private fun ClonyHomeRedesigned(
     var networkIdentitySettings by remember { mutableStateOf(CloneNetworkIdentitySettings()) }
     var hardwareIdentitySettings by remember { mutableStateOf(CloneHardwareIdentitySettings()) }
     val context = LocalContext.current
+    val screenScope = rememberCoroutineScope()
     val systemApps = remember(apps) {
         apps.groupBy { it.packageName }.values.map { copies ->
             copies.first().copy(
@@ -1181,6 +1271,11 @@ private fun ClonyHomeRedesigned(
     }
     val clones = remember(apps) {
         apps.filter { it.isCloned }.sortedWith(compareBy<AppTile> { it.label.lowercase() }.thenBy { it.copyNumber })
+    }
+    val containers = remember(clones) {
+        clones.mapNotNull { app -> app.virtualUserId?.let { it to app } }
+            .groupBy({ it.first }, { it.second })
+            .toSortedMap()
     }
     val occupiedNames = remember(apps) { apps.flatMap { listOfNotNull(it.packageName, it.customPackageName) }.toSet() }
     val detailApp = systemApps.firstOrNull { it.packageName == detailPackage }
@@ -1419,6 +1514,13 @@ private fun ClonyHomeRedesigned(
                                 enabled = detailApp.copyCount < MAX_COPIES_PER_APP
                             ) { countSheetApp = detailApp }
                         }
+                        if (containers.isNotEmpty() && detailApp.copyCount < MAX_COPIES_PER_APP) item {
+                            DetailActionCard(
+                                title = "Add to an existing container",
+                                description = "Share a virtual container with other apps while keeping each app's data separate",
+                                value = "Choose"
+                            ) { containerChoiceApp = detailApp }
+                        }
                         item {
                             DetailActionCard(
                                 "Build props",
@@ -1464,6 +1566,7 @@ private fun ClonyHomeRedesigned(
                     )
                     CloneFeatureScreen.CONNECTION_OPERATOR_INFO -> ConnectionOperatorInfoScreen(
                         appLabel = detailApp.label,
+                        packageName = detailApp.packageName,
                         editingCloneName = editingClone?.displayName,
                         settings = networkIdentitySettings,
                         onSettingsChange = { updatedSettings ->
@@ -1473,6 +1576,40 @@ private fun ClonyHomeRedesigned(
                                 editingClone?.virtualUserId,
                                 updatedSettings
                             )
+                        },
+                        onLoadUaeSample = {
+                            screenScope.launch {
+                                try {
+                                    val sample = withContext(Dispatchers.IO) {
+                                        SimProfileDirectory.fetchUaeSample()
+                                    }
+                                    val updatedSettings = networkIdentitySettings.copy(
+                                        simulateSimProfile = true,
+                                        simPhoneNumber = sample.phoneNumber,
+                                        simCarrierName = sample.carrierName,
+                                        simCountryIso = sample.countryIso,
+                                        simOperatorCode = sample.operatorCode
+                                    )
+                                    networkIdentitySettings = updatedSettings
+                                    onSaveNetworkIdentitySettings(
+                                        detailApp,
+                                        editingClone?.virtualUserId,
+                                        updatedSettings
+                                    )
+                                    Toast.makeText(
+                                        context,
+                                        "Loaded UAE sample carrier data. Review the phone placeholder before testing.",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                } catch (error: Throwable) {
+                                    Toast.makeText(
+                                        context,
+                                        error.message?.takeIf(String::isNotBlank)
+                                            ?: "Couldn't load the online carrier data.",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            }
                         }
                     )
                     CloneFeatureScreen.DEVICE_PROFILE_HARDWARE -> DeviceProfileHardwareScreen(
@@ -1584,6 +1721,41 @@ private fun ClonyHomeRedesigned(
             CloneCopyNameStore.nextNumber(context, app.packageName),
             onDismiss = { countSheetApp = null },
             onApply = { count, names -> cloneCount = count; packageNames = names; countSheetApp = null }
+        )
+    }
+    containerChoiceApp?.let { app ->
+        AlertDialog(
+            onDismissRequest = { containerChoiceApp = null },
+            title = { Text("Choose a container") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    containers.forEach { (userId, installedApps) ->
+                        val alreadyInstalled = installedApps.any { it.packageName == app.packageName }
+                        TextButton(
+                            enabled = !alreadyInstalled && busyPackageName == null,
+                            onClick = {
+                                containerChoiceApp = null
+                                onInstallIntoContainer(app, userId)
+                            }
+                        ) {
+                            Column(Modifier.fillMaxWidth()) {
+                                Text("Container $userId", fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    buildString {
+                                        append(if (alreadyInstalled) "${app.label} is already here" else installedApps.joinToString(" · ") { it.label })
+                                        val accounts = containerAccounts[userId].orEmpty()
+                                        append("\nGoogle accounts: ")
+                                        append(accounts.takeIf { it.isNotEmpty() }?.joinToString(" · ") ?: "none added")
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { containerChoiceApp = null }) { Text("Cancel") } }
         )
     }
     if (showBuildProps && detailApp != null) {

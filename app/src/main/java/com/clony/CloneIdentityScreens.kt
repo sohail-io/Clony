@@ -15,7 +15,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -48,14 +50,24 @@ internal data class CloneNetworkIdentitySettings(
     val hideSimOperatorInfo: Boolean = false,
     val changeWifiMac: Boolean = true,
     val hideWifiInfo: Boolean = false,
-    val hideDnsServers: Boolean = false
+    val hideDnsServers: Boolean = false,
+    val simulateSimProfile: Boolean = false,
+    val simPhoneNumber: String = "",
+    val simCarrierName: String = "",
+    val simCountryIso: String = "",
+    val simOperatorCode: String = ""
 ) {
     fun toStoreOptions() = CloneNetworkIdentityStore.Options(
         changeTelephonyIds,
         hideSimOperatorInfo,
         changeWifiMac,
         hideWifiInfo,
-        hideDnsServers
+        hideDnsServers,
+        simulateSimProfile,
+        simPhoneNumber,
+        simCarrierName,
+        simCountryIso,
+        simOperatorCode
     )
 
     companion object {
@@ -64,7 +76,12 @@ internal data class CloneNetworkIdentitySettings(
             hideSimOperatorInfo = options.hideSimOperatorInfo,
             changeWifiMac = options.changeWifiMac,
             hideWifiInfo = options.hideWifiInfo,
-            hideDnsServers = options.hideDnsServers
+            hideDnsServers = options.hideDnsServers,
+            simulateSimProfile = options.simulateSimProfile,
+            simPhoneNumber = options.simPhoneNumber,
+            simCarrierName = options.simCarrierName,
+            simCountryIso = options.simCountryIso,
+            simOperatorCode = options.simOperatorCode
         )
     }
 }
@@ -237,9 +254,11 @@ internal fun NetworkRadioIdentityScreen(
 @Composable
 internal fun ConnectionOperatorInfoScreen(
     appLabel: String,
+    packageName: String,
     editingCloneName: String?,
     settings: CloneNetworkIdentitySettings,
-    onSettingsChange: (CloneNetworkIdentitySettings) -> Unit
+    onSettingsChange: (CloneNetworkIdentitySettings) -> Unit,
+    onLoadUaeSample: () -> Unit
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -265,6 +284,61 @@ internal fun ConnectionOperatorInfoScreen(
                 onCheckedChange = { onSettingsChange(settings.copy(hideWifiInfo = it)) }
             )
         }
+//        if (packageName == CloneNetworkIdentityStore.SIM_PROFILE_TEST_PACKAGE) {
+            item { IdentityGroupHeading("Dubai Curtains test SIM profile") }
+            item {
+                IdentityToggleCard(
+                    title = "Use editable test SIM values",
+                    description = "Return these values to Dubai Curtains telephony APIs for this copy only. This does not change the device SIM or carrier connection.",
+                    checked = settings.simulateSimProfile,
+                    onCheckedChange = { onSettingsChange(settings.copy(simulateSimProfile = it)) }
+                )
+            }
+            if (settings.simulateSimProfile) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(onClick = onLoadUaeSample, modifier = Modifier.fillMaxWidth()) {
+                            Text("Auto-fill UAE sample from internet")
+                        }
+                        Text(
+                            "Carrier and operator code come from mcc-mnc.org. Phone uses a non-routable test placeholder; replace it with your own test value if needed.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        OutlinedTextField(
+                            value = settings.simPhoneNumber,
+                            onValueChange = { onSettingsChange(settings.copy(simPhoneNumber = it)) },
+                            label = { Text("Phone number") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = settings.simCarrierName,
+                            onValueChange = { onSettingsChange(settings.copy(simCarrierName = it)) },
+                            label = { Text("Carrier / operator name") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = settings.simCountryIso,
+                            onValueChange = { onSettingsChange(settings.copy(simCountryIso = it.take(2).lowercase())) },
+                            label = { Text("Country ISO (2 letters)") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = settings.simOperatorCode,
+                            onValueChange = { value ->
+                                onSettingsChange(settings.copy(simOperatorCode = value.filter(Char::isDigit).take(6)))
+                            },
+                            label = { Text("Operator code (MCC + MNC)") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                    }
+                }
+            }
+//        }
         item {
             IdentityToggleCard(
                 title = "Hide DNS servers",

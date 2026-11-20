@@ -1,9 +1,11 @@
 # TikViral
 
 TikViral creates local app copies using an embedded Android virtualization
-runtime. Each clone is installed into its own virtual user and starts with
-separate app data; it does not copy the original app's private data. Cloning
-and launching happen on the device without a cloning backend.
+runtime. By default, each copy is installed into its own virtual container.
+You can also add another installed app to an existing container. Apps in the
+same container share its virtual account services, while each package keeps
+separate app data. Cloning does not copy the original app's private data, and
+happens on the device without a cloning backend.
 
 Copies keep the source app's icon and use numbered names such as **TikTok 1**
 and **TikTok 2** in TikViral and on the Android home screen. Each shortcut opens

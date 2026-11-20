@@ -42,6 +42,14 @@ public class IPhoneSubInfoProxy extends ClassInvocationStub {
         return false;
     }
 
+    private static Object lineNumber(Object who, Method method, Object[] args) throws Throwable {
+        if (ITelephonyManagerProxy.isDubaiCurtainsTestProfileEnabled()) {
+            return ITelephonyManagerProxy.simulatedPhoneNumber();
+        }
+        if (ITelephonyManagerProxy.hideSimOperatorInfo()) return null;
+        return method.invoke(who, args);
+    }
+
     @ProxyMethod("getDeviceId")
     public static class GetDeviceId extends MethodHook {
         @Override
@@ -110,7 +118,7 @@ public class IPhoneSubInfoProxy extends ClassInvocationStub {
     public static class getLine1NumberForSubscriber extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            return null;
+            return lineNumber(who, method, args);
         }
     }
 
@@ -145,8 +153,7 @@ public class IPhoneSubInfoProxy extends ClassInvocationStub {
     public static class GetLine1Number extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            Object platformValue = method.invoke(who, args);
-            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+            return lineNumber(who, method, args);
         }
     }
 
@@ -154,8 +161,7 @@ public class IPhoneSubInfoProxy extends ClassInvocationStub {
     public static class GetLine1NumberWithFeature extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            Object platformValue = method.invoke(who, args);
-            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+            return lineNumber(who, method, args);
         }
     }
 
@@ -163,8 +169,7 @@ public class IPhoneSubInfoProxy extends ClassInvocationStub {
     public static class GetMsisdn extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            Object platformValue = method.invoke(who, args);
-            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+            return lineNumber(who, method, args);
         }
     }
 
@@ -172,8 +177,7 @@ public class IPhoneSubInfoProxy extends ClassInvocationStub {
     public static class GetMsisdnForSubscriber extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            Object platformValue = method.invoke(who, args);
-            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+            return lineNumber(who, method, args);
         }
     }
 
