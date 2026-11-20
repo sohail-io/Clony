@@ -7,6 +7,10 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.SystemClock
 import android.util.Log
+import android.view.View
+import android.view.ViewGroup
+import android.view.ViewTreeObserver
+import android.webkit.CookieManager
 import android.webkit.WebView
 import top.niunaijun.blackbox.BlackBoxCore
 import top.niunaijun.blackbox.app.BActivityThread
@@ -15,6 +19,8 @@ import top.niunaijun.blackbox.app.configuration.ClientConfiguration
 import top.niunaijun.blackbox.utils.VirtualRuntimeTrace
 import top.niunaijun.blackbox.utils.SimpleCrashFix
 import java.security.MessageDigest
+import java.util.Collections
+import java.util.WeakHashMap
 
 private const val TRACE_TAG = "ClonyTrace"
 
@@ -81,6 +87,61 @@ private fun logVirtualActivity(event: String, activity: Activity) {
     )
 }
 
+private object RecaptchaWebCompatibility {
+    private val layoutListeners = WeakHashMap<Activity, ViewTreeObserver.OnGlobalLayoutListener>()
+    private val configuredWebViews: MutableSet<WebView> =
+        Collections.newSetFromMap(WeakHashMap<WebView, Boolean>())
+
+    fun attach(activity: Activity, packageName: String, userId: Int) {
+        val decorView = activity.window?.decorView ?: return
+        if (!layoutListeners.containsKey(activity)) {
+            val listener = ViewTreeObserver.OnGlobalLayoutListener {
+                configureVisibleWebViews(decorView, packageName, userId)
+            }
+            layoutListeners[activity] = listener
+            decorView.viewTreeObserver.addOnGlobalLayoutListener(listener)
+        }
+        configureVisibleWebViews(decorView, packageName, userId)
+    }
+
+    fun detach(activity: Activity) {
+        val listener = layoutListeners.remove(activity) ?: return
+        val observer = activity.window?.decorView?.viewTreeObserver ?: return
+        if (observer.isAlive) observer.removeOnGlobalLayoutListener(listener)
+    }
+
+    private fun configureVisibleWebViews(root: View, packageName: String, userId: Int) {
+        var configuredCount = 0
+
+        fun visit(view: View) {
+            if (view is WebView) {
+                if (configuredWebViews.add(view)) {
+                    runCatching {
+                        view.settings.javaScriptEnabled = true
+                        view.settings.domStorageEnabled = true
+                        CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
+                        configuredCount++
+                    }.onFailure { error ->
+                        configuredWebViews.remove(view)
+                        Log.w("ClonyWebView", "Could not configure reCAPTCHA WebView for $packageName", error)
+                    }
+                }
+            } else if (view is ViewGroup) {
+                for (index in 0 until view.childCount) visit(view.getChildAt(index))
+            }
+        }
+
+        visit(root)
+        if (configuredCount > 0) {
+            Log.i(
+                "ClonyWebView",
+                "Enabled interactive reCAPTCHA WebView compatibility package=$packageName userId=$userId " +
+                    "webViews=$configuredCount"
+            )
+        }
+    }
+}
+
 class ClonyApplication : Application() {
     override fun attachBaseContext(base: Context) {
         super.attachBaseContext(base)
@@ -123,16 +184,24 @@ class ClonyApplication : Application() {
                 application: Application?,
                 userId: Int
             ) {
+                val recaptchaWebCompatibilityPackage = packageName?.takeIf {
+                    CloneRecaptchaWorkaroundStore.read(this@ClonyApplication, it, userId)
+                }
                 Log.i(TRACE_TAG, "virtualApp stage=beforeOnCreate package=" + packageName +
                     " process=" + processName + " userId=" + userId)
                 application?.registerActivityLifecycleCallbacks(object :
                     Application.ActivityLifecycleCallbacks {
                     override fun onActivityCreated(activity: Activity, state: android.os.Bundle?) {
-                        Unit
+                        recaptchaWebCompatibilityPackage?.let {
+                            RecaptchaWebCompatibility.attach(activity, it, userId)
+                        }
                     }
                     override fun onActivityStarted(activity: Activity) = Unit
                     override fun onActivityResumed(activity: Activity) {
                         SimpleCrashFix.onVirtualActivityResumed(activity)
+                        recaptchaWebCompatibilityPackage?.let {
+                            RecaptchaWebCompatibility.attach(activity, it, userId)
+                        }
                     }
                     override fun onActivityPaused(activity: Activity) {
                         SimpleCrashFix.onVirtualActivityPaused(activity)
@@ -143,6 +212,7 @@ class ClonyApplication : Application() {
                         state: android.os.Bundle
                     ) = Unit
                     override fun onActivityDestroyed(activity: Activity) {
+                        RecaptchaWebCompatibility.detach(activity)
                         SimpleCrashFix.onVirtualActivityDestroyed(activity)
                     }
                 })

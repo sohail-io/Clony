@@ -23,13 +23,20 @@ or change the guest app's package identity.
 - App compatibility depends on the runtime's Android API and app-specific
   requirements. A clone may need a fresh sign-in, and some permissions or system
   integrations are not forwarded yet.
+- When Google Play Services is installed on the device, Clony installs the real
+  Play Services and Google Services Framework packages into each virtual user
+  for sign-in compatibility. If that setup is unavailable, Clony reports it
+  after clone creation; apps that require those services may not work.
+- Clony does not solve or suppress reCAPTCHA challenges, or rewrite Play
+  Integrity results. Complete CAPTCHA challenges normally when they are shown.
+  Apps may still reject a clone when their checks require the original package
+  or signing certificate.
 - An earlier on-device investigation on a Pixel 8a running Android 16 / API 36
   found clone-creation failures related to hidden activity and package-signing
   fields used by the virtual runtime. The installer now imports split APKs too,
   but API 36 runtime compatibility still needs on-device verification. The
   readiness badge can say "ready" even though clone hooks are unavailable. See the
   [on-device investigation](reverse-engineering/clone-app/README.md#clony-on-device-runtime-test).
-- TikViral does not rewrite Play Integrity responses.
 - The host target SDK is 28 to support this runtime's hidden-API reflection.
   The build is intended for local research and sideloading, not Play publishing.
 

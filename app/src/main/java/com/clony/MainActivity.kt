@@ -56,6 +56,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -254,6 +255,7 @@ class MainActivity : ComponentActivity() {
                     onSaveBuildPropsTemplate = ::saveBuildPropsTemplate,
                     onSaveNetworkIdentitySettings = ::saveNetworkIdentitySettings,
                     onSaveHardwareIdentitySettings = ::saveHardwareIdentitySettings,
+                    onSaveRecaptchaWorkaround = ::saveRecaptchaWorkaround,
                     onPinClone = { tile -> pinCloneShortcut(tile) },
                     onDeleteClone = ::deleteClone
                 )
@@ -695,6 +697,11 @@ class MainActivity : ComponentActivity() {
                     }.onFailure {
                         Log.w(TRACE_TAG, "clone_delete stage=hardware_identity_cleanup_failed package=${tile.packageName} userId=$userId", it)
                     }
+                    runCatching {
+                        CloneRecaptchaWorkaroundStore.delete(this@MainActivity, tile.packageName, userId)
+                    }.onFailure {
+                        Log.w(TRACE_TAG, "clone_delete stage=recaptcha_preference_cleanup_failed package=${tile.packageName} userId=$userId", it)
+                    }
                     if (!CloneBuildPropsStore.delete(this@MainActivity, tile.packageName, userId)) {
                         Log.w(TRACE_TAG, "clone_delete stage=build_props_cleanup_failed package=${tile.packageName} userId=$userId")
                     }
@@ -910,6 +917,37 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun saveRecaptchaWorkaround(tile: AppTile, userId: Int?, enabled: Boolean) {
+        val saved = if (userId == null) {
+            CloneRecaptchaWorkaroundStore.writeTemplate(this, tile.packageName, enabled)
+        } else {
+            CloneRecaptchaWorkaroundStore.write(this, tile.packageName, userId, enabled)
+        }
+        if (!saved) {
+            Toast.makeText(this, "Couldn't save the reCAPTCHA preference.", Toast.LENGTH_LONG).show()
+        } else if (userId != null) {
+            lifecycleScope.launch {
+                try {
+                    withContext(Dispatchers.IO) {
+                        BlackBoxCore.get().stopPackage(tile.packageName, userId)
+                    }
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Saved for ${tile.displayName}. Reopen the copy to apply it.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } catch (error: Throwable) {
+                    Log.e(TRACE_TAG, "recaptcha_compatibility_restart_failed package=${tile.packageName} userId=$userId", error)
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Saved, but couldn't restart ${tile.displayName}. Reopen it to apply the change.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+
     private fun shortcutPreferenceKey(packageName: String, userId: Int) = "$packageName:$userId"
 
     private fun createCopies(
@@ -917,7 +955,8 @@ class MainActivity : ComponentActivity() {
         packageNames: List<String>,
         buildProps: CloneBuildProps = CloneBuildProps(),
         identitySettings: CloneNetworkIdentitySettings = CloneNetworkIdentitySettings(),
-        hardwareSettings: CloneHardwareIdentitySettings = CloneHardwareIdentitySettings()
+        hardwareSettings: CloneHardwareIdentitySettings = CloneHardwareIdentitySettings(),
+        recaptchaWorkaround: Boolean = false
     ) {
         if (busyPackageState.value != null) return
         val requestedPackageNames = packageNames.map { it.trim() }
@@ -953,7 +992,7 @@ class MainActivity : ComponentActivity() {
         )
         lifecycleScope.launch {
             try {
-                val createdUserIds = withContext(Dispatchers.IO) {
+                val (createdUserIds, googleServicesAvailable) = withContext(Dispatchers.IO) {
                     val runtime = BlackBoxCore.get()
                     val users = runtime.getUsers().orEmpty()
                     if (!CloneBuildPropsStore.writeTemplate(
@@ -971,12 +1010,18 @@ class MainActivity : ComponentActivity() {
                         )) {
                         error("Couldn't save hardware settings for future copies.")
                     }
+                    if (!CloneRecaptchaWorkaroundStore.writeTemplate(
+                            this@MainActivity, tile.packageName, recaptchaWorkaround
+                        )) {
+                        error("Couldn't save the reCAPTCHA preference for future copies.")
+                    }
                     val existingCopyCount = users.count { runtime.isInstalled(tile.packageName, it.id) }
                     if (existingCopyCount + copiesToCreate > MAX_COPIES_PER_APP) {
                         error("${tile.label} already has the maximum of $MAX_COPIES_PER_APP copies.")
                     }
                     var nextId = maxOf(RUNTIME_USER_ID_START, (users.maxOfOrNull { it.id } ?: 0) + 1)
                     val createdUserIds = mutableListOf<Int>()
+                    var allGoogleServicesAvailable = true
                     try {
                 repeat(copiesToCreate) { index ->
                             val user = runtime.createUser(nextId++)
@@ -1015,6 +1060,15 @@ class MainActivity : ComponentActivity() {
                             ) {
                                 error("Couldn't save hardware settings for copy ${index + 1}.")
                             }
+                            if (!CloneRecaptchaWorkaroundStore.write(
+                                    this@MainActivity,
+                                    tile.packageName,
+                                    user.id,
+                                    recaptchaWorkaround
+                                )
+                            ) {
+                                error("Couldn't save the reCAPTCHA preference for copy ${index + 1}.")
+                            }
                             val result = runtime.installInstalledPackageAsUser(tile.packageName, user.id)
                             if (result == null) {
                                 error("The virtual package service stopped while creating copy ${index + 1}.")
@@ -1038,11 +1092,12 @@ class MainActivity : ComponentActivity() {
                                 Log.i(TRACE_TAG, "clone_create google_services_ready package=" +
                                     tile.packageName + " userId=" + user.id)
                             } else {
+                                allGoogleServicesAvailable = false
                                 Log.w(TRACE_TAG, "clone_create google_services_unavailable package=" +
                                     tile.packageName + " userId=" + user.id + " reason=" + googleServices.msg)
                             }
                         }
-                        createdUserIds.toList()
+                        createdUserIds.toList() to allGoogleServicesAvailable
                     } catch (error: Throwable) {
                         createdUserIds.asReversed().forEach { createdUserId ->
                             runCatching {
@@ -1065,6 +1120,13 @@ class MainActivity : ComponentActivity() {
                                 CloneHardwareIdentityStore.delete(this@MainActivity, tile.packageName, createdUserId)
                             }
                             runCatching {
+                                CloneRecaptchaWorkaroundStore.delete(
+                                    this@MainActivity,
+                                    tile.packageName,
+                                    createdUserId
+                                )
+                            }
+                            runCatching {
                                 top.niunaijun.blackbox.core.network.CloneProxyStore.delete(
                                     this@MainActivity, tile.packageName, createdUserId
                                 )
@@ -1078,9 +1140,15 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 refreshApps()
+                val googleServicesNotice = if (googleServicesAvailable) {
+                    ""
+                } else {
+                    " Play Services is unavailable; apps that depend on it may not work."
+                }
                 showInfo(
                     "Created $copiesToCreate ${tile.label} ${if (copiesToCreate == 1) "copy" else "copies"}. " +
-                        "Confirm each Home screen prompt to add its icon with the original app name and icon."
+                        "Confirm each Home screen prompt to add its icon with the original app name and icon." +
+                        googleServicesNotice
                 )
                 queueHomeShortcutsForCopies(tile, createdUserIds)
             } catch (error: Throwable) {
@@ -1185,7 +1253,14 @@ class MainActivity : ComponentActivity() {
                     CloneCopyNameStore.nextNumber(this, tile.packageName) + index
                 )
             }
-        createCopies(tile, packageNames, buildProps, identitySettings, hardwareSettings)
+        createCopies(
+            tile,
+            packageNames,
+            buildProps,
+            identitySettings,
+            hardwareSettings,
+            CloneRecaptchaWorkaroundStore.readTemplate(this, packageName)
+        )
     }
 
     private fun showProgress(packageName: String, message: String) {
@@ -1236,11 +1311,12 @@ private fun ClonyHomeRedesigned(
     onRetry: (String) -> Unit,
     onRefresh: () -> Unit,
     onOpenClone: (AppTile) -> Unit,
-    onCreateCopies: (AppTile, List<String>, CloneBuildProps, CloneNetworkIdentitySettings, CloneHardwareIdentitySettings) -> Unit,
+    onCreateCopies: (AppTile, List<String>, CloneBuildProps, CloneNetworkIdentitySettings, CloneHardwareIdentitySettings, Boolean) -> Unit,
     onInstallIntoContainer: (AppTile, Int) -> Unit,
     onSaveBuildPropsTemplate: (AppTile, CloneBuildProps) -> Unit,
     onSaveNetworkIdentitySettings: (AppTile, Int?, CloneNetworkIdentitySettings) -> Unit,
     onSaveHardwareIdentitySettings: (AppTile, Int?, CloneHardwareIdentitySettings) -> Unit,
+    onSaveRecaptchaWorkaround: (AppTile, Int?, Boolean) -> Unit,
     onPinClone: (AppTile) -> Unit,
     onDeleteClone: (AppTile) -> Unit
 ) {
@@ -1259,6 +1335,7 @@ private fun ClonyHomeRedesigned(
     var buildProps by remember { mutableStateOf(CloneBuildProps()) }
     var networkIdentitySettings by remember { mutableStateOf(CloneNetworkIdentitySettings()) }
     var hardwareIdentitySettings by remember { mutableStateOf(CloneHardwareIdentitySettings()) }
+    var recaptchaWorkaroundEnabled by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val screenScope = rememberCoroutineScope()
     val systemApps = remember(apps) {
@@ -1304,6 +1381,14 @@ private fun ClonyHomeRedesigned(
         else CloneHardwareIdentitySettings.fromStore(
             CloneHardwareIdentityStore.readTemplate(context, detailApp.packageName)
         )
+    }
+    val recaptchaWorkaroundForNewCopies = remember(
+        detailApp?.packageName,
+        editingClone?.virtualUserId,
+        recaptchaWorkaroundEnabled
+    ) {
+        if (detailApp == null || editingClone == null) recaptchaWorkaroundEnabled
+        else CloneRecaptchaWorkaroundStore.readTemplate(context, detailApp.packageName)
     }
     val requestValid = detailApp != null &&
         cloneCount in 1..(MAX_COPIES_PER_APP - (detailApp?.copyCount ?: 0)) &&
@@ -1366,6 +1451,9 @@ private fun ClonyHomeRedesigned(
             cloneToEdit?.virtualUserId?.let { CloneHardwareIdentityStore.read(context, app.packageName, it) }
                 ?: CloneHardwareIdentityStore.readTemplate(context, app.packageName)
         )
+        recaptchaWorkaroundEnabled = cloneToEdit?.virtualUserId?.let {
+            CloneRecaptchaWorkaroundStore.read(context, app.packageName, it)
+        } ?: CloneRecaptchaWorkaroundStore.readTemplate(context, app.packageName)
     }
 
     Scaffold(
@@ -1409,7 +1497,8 @@ private fun ClonyHomeRedesigned(
                                 namesForRequest,
                                 buildProps,
                                 identitySettingsForNewCopies,
-                                hardwareSettingsForNewCopies
+                                hardwareSettingsForNewCopies,
+                                recaptchaWorkaroundForNewCopies
                             )
                         }
                     },
@@ -1528,6 +1617,19 @@ private fun ClonyHomeRedesigned(
                                 else "${buildProps.overrideCount} custom values for new copies",
                                 "Edit"
                             ) { showBuildProps = true }
+                        }
+                        item {
+                            RecaptchaWorkaroundCard(
+                                enabled = recaptchaWorkaroundEnabled,
+                                onEnabledChange = { enabled ->
+                                    recaptchaWorkaroundEnabled = enabled
+                                    onSaveRecaptchaWorkaround(
+                                        detailApp,
+                                        editingClone?.virtualUserId,
+                                        enabled
+                                    )
+                                }
+                            )
                         }
                         item {
                             DetailActionCard(
@@ -1895,6 +1997,30 @@ internal fun DetailActionCard(title: String, description: String, value: String,
             Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
                 Text(value, Modifier.padding(horizontal = 14.dp, vertical = 9.dp), fontWeight = FontWeight.Bold)
             }
+        }
+    }
+}
+
+@Composable
+private fun RecaptchaWorkaroundCard(enabled: Boolean, onEnabledChange: (Boolean) -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text("reCAPTCHA workaround", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Enables JavaScript, DOM storage, and third-party cookies in clone WebViews. Challenges stay interactive.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(checked = enabled, onCheckedChange = onEnabledChange)
         }
     }
 }
