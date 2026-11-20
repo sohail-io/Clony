@@ -338,7 +338,8 @@ public class IActivityManagerProxy extends ClassInvocationStub {
         }
     }
 
-    public static Object BindServiceCommon(Object who, Method method, Object[] args, int callingPackageIndex) throws Throwable {
+    public static Object BindServiceCommon(Object who, Method method, Object[] args, int callingPackageIndex,
+                                           int instanceNameIndex) throws Throwable {
         Intent intent = (Intent) args[2];
         if (intent == null) return method.invoke(who, args);
         String resolvedType = (String) args[3];
@@ -377,6 +378,14 @@ public class IActivityManagerProxy extends ClassInvocationStub {
             if (virtualRoute) {
                 int flagsIndex = getFlagsIndex(args);
                 if (flagsIndex >= 0) args[flagsIndex] = MethodParameterUtils.toInt(args[flagsIndex]) & ~Context.BIND_EXTERNAL_SERVICE;
+                if (instanceNameIndex >= 0 && args[instanceNameIndex] instanceof String) {
+                    String instanceName = (String) args[instanceNameIndex];
+                    args[instanceNameIndex] = null;
+                    ComponentName targetComponent = target.getComponent();
+                    Slog.i(TAG, "service_bind_virtual_instance package="
+                            + (targetComponent == null ? "unknown" : targetComponent.getPackageName())
+                            + " instance=" + instanceName + " result=shared_proxy_process");
+                }
             }
             args[callingPackageIndex] = BlackBoxCore.getHostPkg();
             args[2] = proxyIntent;
@@ -411,7 +420,7 @@ public class IActivityManagerProxy extends ClassInvocationStub {
 
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            return BindServiceCommon(who,method,args,6);
+            return BindServiceCommon(who, method, args, 6, -1);
         }
 
         @Override
@@ -425,7 +434,7 @@ public class IActivityManagerProxy extends ClassInvocationStub {
     public static class bindServiceInstance extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            return BindServiceCommon(who,method,args,7);
+            return BindServiceCommon(who, method, args, 7, 6);
         }
 
         @Override
@@ -439,9 +448,7 @@ public class IActivityManagerProxy extends ClassInvocationStub {
     public static class BindIsolatedService extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            
-            args[6] = null;
-            return BindServiceCommon(who,method,args,7);
+            return BindServiceCommon(who, method, args, 7, 6);
         }
 
         @Override

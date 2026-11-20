@@ -69,6 +69,7 @@ import top.niunaijun.blackbox.fake.service.IPermissionManagerProxy;
 import top.niunaijun.blackbox.fake.service.IPersistentDataBlockServiceProxy;
 import top.niunaijun.blackbox.fake.service.IPhoneSubInfoProxy;
 import top.niunaijun.blackbox.fake.service.IPowerManagerProxy;
+import top.niunaijun.blackbox.fake.service.IRoleManagerProxy;
 import top.niunaijun.blackbox.fake.service.ApkAssetsProxy;
 import top.niunaijun.blackbox.fake.service.ResourcesManagerProxy;
 import top.niunaijun.blackbox.fake.service.IShortcutManagerProxy;
@@ -120,6 +121,7 @@ public class HookManager {
             addInjector(new ContentServiceStub());
             addInjector(new IWindowManagerProxy());
             addInjector(new IUserManagerProxy());
+            addInjector(new IRoleManagerProxy());
             addInjector(new RestrictionsManagerStub());
             addInjector(new IMediaSessionManagerProxy());
             addInjector(new IAudioServiceProxy());
