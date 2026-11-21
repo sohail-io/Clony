@@ -9,7 +9,12 @@ import android.os.Bundle;
 import android.os.IBinder;
 
 import java.io.File;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.util.ArrayList;
+import java.util.List;
 
 import top.niunaijun.blackbox.BlackBoxCore;
 import top.niunaijun.blackbox.app.BActivityThread;
@@ -273,8 +278,78 @@ public class ActivityManagerCommonProxy {
     public static class GetAppTasks extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            MethodParameterUtils.replaceFirstAppPkg(args);
-            return method.invoke(who, args);
+            String virtualPackage = MethodParameterUtils.replaceFirstAppPkg(args);
+            Object result = method.invoke(who, args);
+            if (virtualPackage == null
+                    || !virtualPackage.equals(BActivityThread.getAppPackageName())
+                    || !(result instanceof List)) {
+                return result;
+            }
+
+            String hostPackage = BlackBoxCore.getHostPkg();
+            if (hostPackage == null || hostPackage.equals(virtualPackage)) {
+                return result;
+            }
+
+            List<?> appTasks = (List<?>) result;
+            List<Object> wrappedTasks = new ArrayList<>(appTasks.size());
+            for (Object appTask : appTasks) {
+                wrappedTasks.add(wrapAppTaskForHost(appTask, virtualPackage, hostPackage));
+            }
+            Slog.d(TAG, "Wrapped " + wrappedTasks.size()
+                    + " app task handles for virtual package " + virtualPackage);
+            return wrappedTasks;
+        }
+    }
+
+    private static Object wrapAppTaskForHost(final Object appTask,
+                                             final String virtualPackage,
+                                             final String hostPackage) {
+        if (appTask == null) {
+            return null;
+        }
+
+        Class<?>[] interfaces = appTask.getClass().getInterfaces();
+        if (interfaces.length == 0) {
+            return appTask;
+        }
+
+        InvocationHandler handler = new InvocationHandler() {
+            @Override
+            public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+                if (method.getDeclaringClass() == Object.class) {
+                    if ("equals".equals(method.getName())) {
+                        return proxy == (args == null ? null : args[0]);
+                    }
+                    if ("hashCode".equals(method.getName())) {
+                        return System.identityHashCode(proxy);
+                    }
+                    if ("toString".equals(method.getName())) {
+                        return "VirtualAppTask(" + appTask + ")";
+                    }
+                }
+
+                Object[] forwardedArgs = args == null ? null : args.clone();
+                if (forwardedArgs != null) {
+                    for (int i = 0; i < forwardedArgs.length; i++) {
+                        if (virtualPackage.equals(forwardedArgs[i])) {
+                            forwardedArgs[i] = hostPackage;
+                        }
+                    }
+                }
+                try {
+                    return method.invoke(appTask, forwardedArgs);
+                } catch (InvocationTargetException exception) {
+                    throw exception.getCause();
+                }
+            }
+        };
+
+        try {
+            return Proxy.newProxyInstance(appTask.getClass().getClassLoader(), interfaces, handler);
+        } catch (IllegalArgumentException exception) {
+            Slog.w(TAG, "Could not wrap an app task handle", exception);
+            return appTask;
         }
     }
 

@@ -224,7 +224,7 @@ public class BActivityThread extends IBActivityThread.Stub {
             if (!NativeCore.configureProxy(appConfig.proxyType, appConfig.proxyHost, appConfig.proxyPort,
                     appConfig.proxyUser.getBytes(java.nio.charset.StandardCharsets.UTF_8),
                     appConfig.proxyPassword.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                    appConfig.proxyUdpRelayEnabled)) {
+                    appConfig.proxyType == 1)) {
                 android.util.Log.e("ClonyCloneProxy", "event=proxy_configure result=failure"
                         + " package=" + appConfig.packageName + " userId=" + appConfig.userId
                         + " endpoint_or_credentials_logged=false");
@@ -234,7 +234,7 @@ public class BActivityThread extends IBActivityThread.Stub {
             android.util.Log.i("ClonyCloneProxy", "event=proxy_configure result=success"
                     + " package=" + appConfig.packageName + " userId=" + appConfig.userId
                     + " transport=" + (appConfig.proxyType == 2 ? "http_connect_tcp"
-                    : appConfig.proxyType == 1 ? (appConfig.proxyUdpRelayEnabled ? "socks5_tcp_udp" : "socks5_tcp_only") : "direct")
+                    : appConfig.proxyType == 1 ? "socks5_tcp_udp" : "direct")
                     + " endpoint_or_credentials_logged=false");
             this.mLastKnownUserId = appConfig.userId;
             this.mHasLastKnownUserId = true;

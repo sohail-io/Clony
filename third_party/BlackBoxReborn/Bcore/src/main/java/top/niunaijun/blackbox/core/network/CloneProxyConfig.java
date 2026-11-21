@@ -3,16 +3,26 @@ import java.nio.charset.StandardCharsets;
 public final class CloneProxyConfig {
  public final int type, port;
  public final boolean socksUdpRelayEnabled;
- public final String host, username, password;
+ public final String host, username, password, resolvedHost;
  public CloneProxyConfig(int type, String host, int port, String username, String password) {
-  this(type,host,port,username,password,false);
+  this(type,host,port,username,password,true,"");
  }
  public CloneProxyConfig(int type, String host, int port, String username, String password, boolean socksUdpRelayEnabled) {
+  this(type,host,port,username,password,socksUdpRelayEnabled,"");
+ }
+ public CloneProxyConfig(int type, String host, int port, String username, String password,
+                         boolean socksUdpRelayEnabled, String resolvedHost) {
   this.type=type; this.host=host; this.port=port; this.username=username; this.password=password;
-  this.socksUdpRelayEnabled=type==1&&socksUdpRelayEnabled;
+  this.resolvedHost=resolvedHost==null?"":resolvedHost;
+  // SOCKS5 always relays UDP/QUIC. Keep accepting the legacy argument so older
+  // callers and saved settings remain readable, but do not allow it to disable relay.
+  this.socksUdpRelayEnabled=type==1;
+ }
+ public CloneProxyConfig withResolvedHost(String address) {
+  return new CloneProxyConfig(type,host,port,username,password,socksUdpRelayEnabled,address);
  }
  public static CloneProxyConfig parse(int type, String value) {
-  return parse(type,value,false);
+  return parse(type,value,true);
  }
  public static CloneProxyConfig parse(int type, String value, boolean socksUdpRelayEnabled) {
   if(type==0)return new CloneProxyConfig(0,"",0,"","",false);
@@ -28,7 +38,7 @@ public final class CloneProxyConfig {
   if(parts.length==4&&(user.isEmpty()||pass.isEmpty()))throw new IllegalArgumentException("Enter both username and password, or use host:port.");
   if(user.indexOf('\r')>=0||user.indexOf('\n')>=0||pass.indexOf('\r')>=0||pass.indexOf('\n')>=0||user.indexOf('\0')>=0||pass.indexOf('\0')>=0)throw new IllegalArgumentException("Credentials cannot contain control separators.");
   if(user.getBytes(StandardCharsets.UTF_8).length>255||pass.getBytes(StandardCharsets.UTF_8).length>255)throw new IllegalArgumentException("Credentials must be at most 255 UTF-8 bytes each.");
-  return new CloneProxyConfig(type,parts[0],port,user,pass,socksUdpRelayEnabled);
+  return new CloneProxyConfig(type,parts[0],port,user,pass,socksUdpRelayEnabled,"");
  }
  private static void validateHost(String host) {
   if(host.isEmpty()||host.length()>253)throw new IllegalArgumentException("Enter a valid IPv4 address or proxy hostname.");

@@ -136,7 +136,8 @@ public class ITelephonyManagerProxy extends BinderInvocationStub {
     }
 
     static boolean hideSimOperatorInfo() {
-        return identityOptions().hideSimOperatorInfo;
+        CloneNetworkIdentityStore.Options options = identityOptions();
+        return options.hideSimOperatorInfo || options.matchProxyRegion;
     }
 
     private static CloneNetworkIdentityStore.Options identityOptions() {
@@ -149,6 +150,13 @@ public class ITelephonyManagerProxy extends BinderInvocationStub {
 
     static Object hideSimOperatorString(Object who, Method method, Object[] args) throws Throwable {
         CloneNetworkIdentityStore.Options options = identityOptions();
+        if (options.matchProxyRegion) {
+            String methodName = method.getName().toLowerCase(java.util.Locale.ROOT);
+            if (methodName.contains("countryiso")) return options.proxyCountryIso;
+            // Do not report the phone's MCC/MNC or carrier when only the proxy
+            // country is known. Cell and neighboring-cell APIs are hidden too.
+            return "";
+        }
         if (isDubaiCurtainsTestProfileEnabled(options)) {
             String methodName = method.getName().toLowerCase(java.util.Locale.ROOT);
             String configured = null;

@@ -39,15 +39,21 @@ static bool socks5Authenticate(int fd,const Config& c,const std::function<bool(c
  }
  return true;
 }
-bool handshake(int fd,const sockaddr* address,const Config& c,int timeoutMs,int* httpStatus){
+bool handshake(int fd,const sockaddr* address,const Config& c,int timeoutMs,int* httpStatus,
+               const std::string* destinationHost){
  if(httpStatus)*httpStatus=0;
  long long end=now()+timeoutMs;
  auto put=[&](const std::string& b){return transfer(fd,(void*)b.data(),b.size(),true,end);};
  auto get=[&](void* b,size_t n){return transfer(fd,b,n,false,end);};
  std::string target;char ip[INET6_ADDRSTRLEN];uint16_t port;
+ const bool useDomain=destinationHost!=nullptr&&!destinationHost->empty();
  if(address->sa_family==AF_INET){auto a=(const sockaddr_in*)address;inet_ntop(AF_INET,&a->sin_addr,ip,sizeof(ip));target=ip;port=ntohs(a->sin_port);}
  else if(address->sa_family==AF_INET6){auto a=(const sockaddr_in6*)address;inet_ntop(AF_INET6,&a->sin6_addr,ip,sizeof(ip));target="["+std::string(ip)+"]";port=ntohs(a->sin6_port);}
  else {errno=EAFNOSUPPORT;return false;}
+ if(useDomain){
+  if(destinationHost->size()>255){errno=EINVAL;return false;}
+  target=*destinationHost;
+ }
  if(c.type==2){
   std::string authority=target+":"+std::to_string(port);
   std::string request="CONNECT "+authority+" HTTP/1.1\r\nHost: "+authority+"\r\n";
@@ -86,7 +92,8 @@ bool handshake(int fd,const sockaddr* address,const Config& c,int timeoutMs,int*
  char reply[4];
  if(!socks5Authenticate(fd,c,put,get))return false;
  std::string request("\5\1\0",3);
- if(address->sa_family==AF_INET){request+=(char)1;request.append((char*)&((const sockaddr_in*)address)->sin_addr,4);}
+ if(useDomain){request+=(char)3;request+=(char)target.size();request+=target;}
+ else if(address->sa_family==AF_INET){request+=(char)1;request.append((char*)&((const sockaddr_in*)address)->sin_addr,4);}
  else {request+=(char)4;request.append((char*)&((const sockaddr_in6*)address)->sin6_addr,16);}
  request+=(char)(port>>8);request+=(char)port;
  if(!put(request)||!get(reply,4))return false;

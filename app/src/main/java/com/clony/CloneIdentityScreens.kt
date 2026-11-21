@@ -1,5 +1,6 @@
 package com.clony
 
+import java.util.Locale
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -55,7 +56,9 @@ internal data class CloneNetworkIdentitySettings(
     val simPhoneNumber: String = "",
     val simCarrierName: String = "",
     val simCountryIso: String = "",
-    val simOperatorCode: String = ""
+    val simOperatorCode: String = "",
+    val matchProxyRegion: Boolean = false,
+    val proxyCountryIso: String = ""
 ) {
     fun toStoreOptions() = CloneNetworkIdentityStore.Options(
         changeTelephonyIds,
@@ -67,7 +70,9 @@ internal data class CloneNetworkIdentitySettings(
         simPhoneNumber,
         simCarrierName,
         simCountryIso,
-        simOperatorCode
+        simOperatorCode,
+        matchProxyRegion,
+        proxyCountryIso
     )
 
     companion object {
@@ -81,7 +86,9 @@ internal data class CloneNetworkIdentitySettings(
             simPhoneNumber = options.simPhoneNumber,
             simCarrierName = options.simCarrierName,
             simCountryIso = options.simCountryIso,
-            simOperatorCode = options.simOperatorCode
+            simOperatorCode = options.simOperatorCode,
+            matchProxyRegion = options.matchProxyRegion,
+            proxyCountryIso = options.proxyCountryIso
         )
     }
 }
@@ -276,6 +283,18 @@ internal fun ConnectionOperatorInfoScreen(
             )
         }
         item { IdentityGroupHeading("Connection details") }
+        item {
+            IdentityStatusCard(
+                title = "SIM and network country",
+                description = if (settings.matchProxyRegion) {
+                    "This copy reports ${settings.proxyCountryIso.uppercase(Locale.ROOT)} for SIM and network country, and suppresses local SIM, operator and cell details."
+                } else {
+                    "Save a proxy in Proxy / network to detect its exit country and apply it to this copy."
+                },
+                status = if (settings.matchProxyRegion) "Proxy matched" else "Device region",
+                active = settings.matchProxyRegion
+            )
+        }
         item {
             IdentityToggleCard(
                 title = "Hide Wi-Fi info",

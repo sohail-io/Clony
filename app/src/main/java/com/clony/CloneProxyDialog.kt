@@ -1,6 +1,7 @@
 package com.clony
 
 import android.util.Log
+import android.widget.Toast
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -13,7 +14,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -31,8 +31,12 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.util.Locale
 import top.niunaijun.blackbox.BlackBoxCore
 import top.niunaijun.blackbox.core.NativeCore
+import top.niunaijun.blackbox.core.CloneNetworkIdentityStore
 import top.niunaijun.blackbox.core.network.CloneProxyConfig
 import top.niunaijun.blackbox.core.network.CloneProxyStore
 
@@ -49,9 +53,17 @@ private fun proxyProbeFailureMessage(type: Int, result: Int): String {
     return when (stage) {
         1 -> "Could not connect to the proxy (code $code). Check its address, port, and availability."
         2 -> if (type == 1) {
-            "SOCKS5 TCP tunnel failed (code $code). Check credentials and CONNECT support."
+            if (code == 13) {
+                "SOCKS5 handshake was rejected (EACCES 13). Confirm this endpoint is SOCKS5, not HTTP CONNECT, " +
+                        "and check the proxy authentication method and credentials."
+            } else {
+                "SOCKS5 TCP tunnel failed (code $code). Check credentials and CONNECT support."
+            }
         } else if (code == 71) {
             "This endpoint did not reply as an HTTP proxy. Check the proxy type; a SOCKS5 endpoint must use SOCKS5 mode."
+        } else if (code == 407) {
+            "HTTP proxy returned 407. It requires or rejected authentication; check the credentials. " +
+                    "This app sends Basic proxy authentication."
         } else if (code in 100..599) {
             "HTTP CONNECT returned HTTP $code. A 2xx response is required; check credentials and proxy destination rules."
         } else {
@@ -78,7 +90,6 @@ internal fun CloneProxyDialog(
     val scope = rememberCoroutineScope()
     val userId = app.virtualUserId
     var type by remember { mutableIntStateOf(0) }
-    var socksUdpRelayEnabled by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
     var message by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(true) }
@@ -98,7 +109,6 @@ internal fun CloneProxyDialog(
             }
             type = config.type
             input = config.input()
-            socksUdpRelayEnabled = config.socksUdpRelayEnabled
             loaded = true
         } catch (error: Exception) {
             message = error.message ?: "Couldn't load this copy's proxy settings."
@@ -143,36 +153,21 @@ internal fun CloneProxyDialog(
                         visualTransformation = PasswordVisualTransformation(),
                         singleLine = true
                     )
-                    if (type == 1) {
-                        Row {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("Relay UDP/QUIC through SOCKS5")
-                                Text(
-                                    if (socksUdpRelayEnabled) {
-                                        "Enabled. If the clone turns black or freezes, turn this off."
-                                    } else {
-                                        "Off: TCP uses SOCKS5; UDP/QUIC uses your phone’s normal network."
-                                    },
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            }
-                            Switch(
-                                checked = socksUdpRelayEnabled,
-                                onCheckedChange = { socksUdpRelayEnabled = it },
-                                enabled = !busy && loaded
-                            )
-                        }
-                    }
                     Text(
                         if (type == 1) {
-                            "TCP uses SOCKS5. UDP/QUIC can use the SOCKS5 relay when enabled above and the server " +
-                                    "supports UDP ASSOCIATE; otherwise it uses your phone’s normal network. " +
-                                    "DNS uses your phone’s resolver; this is not a VPN."
+                            "TCP and UDP/QUIC use SOCKS5. The server must support UDP ASSOCIATE. " +
+                                    "Destination hostnames resolve through SOCKS5; the proxy hostname resolves with your phone’s DNS when saved. " +
+                                    "This is not a VPN."
                         } else {
                             "HTTP CONNECT sends TCP through the proxy. UDP/QUIC uses your phone’s normal network, " +
                                     "not the proxy. DNS uses your phone’s resolver; this is not a VPN."
                         },
                         style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        "Saving detects the proxy exit country through ipwho.is and applies it to this copy’s SIM and network-country APIs.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     TextButton(
                         enabled = !busy && loaded,
@@ -180,7 +175,7 @@ internal fun CloneProxyDialog(
                             scope.launch {
                                 busy = true
                                 try {
-                                    val config = CloneProxyConfig.parse(type, input, socksUdpRelayEnabled)
+                                    val config = CloneProxyConfig.parse(type, input)
                                     val result = withContext(Dispatchers.IO) {
                                         NativeCore.probeProxy(
                                             config.type,
@@ -238,11 +233,51 @@ internal fun CloneProxyDialog(
                     scope.launch {
                         busy = true
                         try {
-                            val config = CloneProxyConfig.parse(type, input, socksUdpRelayEnabled)
+                            val config = CloneProxyConfig.parse(type, input)
+                            val (proxyCountryIso, configToSave) = withContext(Dispatchers.IO) {
+                                if (config.type == 0) {
+                                    "" to config
+                                } else {
+                                    val endpointAddress = InetAddress.getAllByName(config.host)
+                                        .firstOrNull { it is Inet4Address }
+                                        ?.hostAddress
+                                        ?: throw IllegalStateException("The proxy hostname did not resolve to an IPv4 address.")
+                                    val preparedConfig = config.withResolvedHost(endpointAddress)
+                                    ProxyRegionResolver.detectCountryIso(preparedConfig) to preparedConfig
+                                }
+                            }
                             withContext(Dispatchers.IO) {
-                                CloneProxyStore.save(context, app.packageName, selectedUserId, config)
+                                val previousProxy = CloneProxyStore.read(context, app.packageName, selectedUserId)
+                                val previousIdentity = CloneNetworkIdentityStore.read(
+                                    context, app.packageName, selectedUserId
+                                )
+                                try {
+                                    CloneProxyStore.save(context, app.packageName, selectedUserId, configToSave)
+                                    if (!CloneNetworkIdentityStore.updateProxyRegion(
+                                            context, app.packageName, selectedUserId, proxyCountryIso
+                                        )
+                                    ) {
+                                        throw IllegalStateException("Couldn't save the proxy region for this copy.")
+                                    }
+                                } catch (error: Exception) {
+                                    runCatching {
+                                        CloneProxyStore.save(context, app.packageName, selectedUserId, previousProxy)
+                                    }
+                                    runCatching {
+                                        CloneNetworkIdentityStore.write(
+                                            context, app.packageName, selectedUserId, previousIdentity
+                                        )
+                                    }
+                                    throw error
+                                }
                                 BlackBoxCore.get().stopPackage(app.packageName, selectedUserId)
                             }
+                            val regionMessage = if (proxyCountryIso.isBlank()) {
+                                "Proxy removed. SIM and network country matching is off."
+                            } else {
+                                "Proxy saved. SIM and network country set to ${proxyCountryIso.uppercase(Locale.ROOT)}."
+                            }
+                            Toast.makeText(context, regionMessage, Toast.LENGTH_SHORT).show()
                             onSaved()
                         } catch (error: Exception) {
                             message = error.message ?: "Couldn't save proxy settings."

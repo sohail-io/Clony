@@ -61,7 +61,8 @@ public final class CloneProxyStore {
    cipher.init(Cipher.DECRYPT_MODE,key(false),new GCMParameterSpec(128,bytes,0,12));
    cipher.updateAAD((pkg+":"+identity).getBytes(StandardCharsets.UTF_8));
    JSONObject json=new JSONObject(new String(cipher.doFinal(bytes,12,bytes.length-12),StandardCharsets.UTF_8));
-   CloneProxyConfig config=CloneProxyConfig.parse(json.getInt("type"),json.getString("input"),json.optBoolean("socksUdpRelayEnabled",false));
+   CloneProxyConfig config=CloneProxyConfig.parse(json.getInt("type"),json.getString("input"),json.optBoolean("socksUdpRelayEnabled",false))
+           .withResolvedHost(json.optString("resolvedHost",""));
    android.util.Log.i(LOG_TAG,"event=proxy_settings_read result=success package="+pkg+" identity="+identity+" type="+config.type+" udpRelay="+config.socksUdpRelayEnabled+" endpoint_or_credentials_logged=false");
    return config;
   }catch(Exception error){throw new IllegalStateException("Cannot read this clone's proxy settings; refusing direct fallback.");}
@@ -79,6 +80,7 @@ public final class CloneProxyStore {
    Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");cipher.init(Cipher.ENCRYPT_MODE,key(true));
    cipher.updateAAD((pkg+":"+identity).getBytes(StandardCharsets.UTF_8));
    JSONObject json=new JSONObject();json.put("type",config.type);json.put("input",config.input());
+   json.put("resolvedHost",config.resolvedHost);
    json.put("socksUdpRelayEnabled",config.socksUdpRelayEnabled);
    byte[] encrypted=cipher.doFinal(json.toString().getBytes(StandardCharsets.UTF_8));
    out=file.startWrite();out.write(cipher.getIV());out.write(encrypted);file.finishWrite(out);

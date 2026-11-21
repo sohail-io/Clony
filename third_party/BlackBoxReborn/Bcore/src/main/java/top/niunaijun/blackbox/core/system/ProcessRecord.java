@@ -60,7 +60,7 @@ public class ProcessRecord extends Binder {
         config.proxyType = proxy.type;
         config.proxyUdpRelayEnabled = proxy.socksUdpRelayEnabled;
         config.proxyPort = proxy.port;
-        config.proxyHost = proxy.host;
+        config.proxyHost = proxy.resolvedHost.isEmpty() ? proxy.host : proxy.resolvedHost;
         config.proxyUser = proxy.username;
         config.proxyPassword = proxy.password;
         return config;

@@ -11,18 +11,26 @@
 #include <cerrno>
 #include <cstring>
 #include <atomic>
+#include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <string>
+#include <cctype>
+#include <cstdint>
 #include <time.h>
 #include <chrono>
+#include <thread>
 #include <unistd.h>
 
 static CloneProxy::Config settings;
 static int (*realConnect)(int,const sockaddr*,socklen_t)=nullptr;
 static int (*realSocket)(int,int,int)=nullptr;
 static int (*realClose)(int)=nullptr;
+static int (*realGetAddrInfo)(const char*,const char*,const addrinfo*,addrinfo**)=nullptr;
+static int (*realAndroidGetAddrInfoForNet)(const char*,const char*,const addrinfo*,unsigned int,unsigned int,addrinfo**)=nullptr;
 static ssize_t (*realSend)(int,const void*,size_t,int)=nullptr;
 static ssize_t (*realRecv)(int,void*,size_t,int)=nullptr;
 static ssize_t (*realSendTo)(int,const void*,size_t,int,const sockaddr*,socklen_t)=nullptr;
@@ -32,14 +40,21 @@ static ssize_t (*realRecvMsg)(int,msghdr*,int)=nullptr;
 static int (*realSendMmsg)(int,mmsghdr*,unsigned int,int)=nullptr;
 static int (*realRecvMmsg)(int,mmsghdr*,unsigned int,int,timespec*)=nullptr;
 static bool configured=false;
-static bool socksUdpRelayEnabled=false;
 static std::mutex configLock;
+static std::string proxyEndpointName;
+static std::mutex remoteDnsLock;
+static std::unordered_map<std::string,std::string> remoteDnsAddressToName;
+static std::unordered_map<std::string,uint32_t> remoteDnsNameToId;
+static uint32_t nextRemoteDnsId=1;
+static thread_local bool bypassRemoteDnsResolution=false;
+static std::atomic<bool> loggedRemoteDnsResolution{false};
 static constexpr const char* PROXY_LOG_TAG="ClonyCloneProxy";
 // connect() is synchronous at the interception point. Keep its worst-case
 // connect+handshake wait below Android's usual input-dispatch ANR interval.
 static constexpr int PROXY_CONNECT_TIMEOUT_MS=1500;
 static constexpr int PROXY_HANDSHAKE_TIMEOUT_MS=1500;
 static constexpr int PROXY_UDP_TIMEOUT_MS=1500;
+static constexpr int PROXY_ENDPOINT_DNS_TIMEOUT_MS=1200;
 static std::atomic<bool> loggedLocalDatagramBypass{false};
 static std::atomic<bool> loggedDirectUdpBypass{false};
 
@@ -57,6 +72,13 @@ static socklen_t udpRelayLength=0;
 static bool udpRelayFailed=false;
 static int udpRelayError=0;
 static std::chrono::steady_clock::time_point udpRelayRetryAfter{};
+
+class RemoteDnsBypassScope {
+ bool previous;
+public:
+ RemoteDnsBypassScope():previous(bypassRemoteDnsResolution){bypassRemoteDnsResolution=true;}
+ ~RemoteDnsBypassScope(){bypassRemoteDnsResolution=previous;}
+};
 
 static bool internetAddress(const sockaddr* address){return address&&(address->sa_family==AF_INET||address->sa_family==AF_INET6);}
 static long long elapsedMilliseconds(const std::chrono::steady_clock::time_point& start){
@@ -92,7 +114,7 @@ static void logUdpRouteOnce(int fd,const sockaddr* destination,const char* resul
  }
  __android_log_print(ANDROID_LOG_INFO,PROXY_LOG_TAG,
                      "event=udp_route result=%s transport=%s destination_family=%s destination_port=%u destination_port_known=%s reason=%s proxy_endpoint_logged=false credentials_logged=false",
-                     result,settings.type==2?"http_connect_tcp":(socksUdpRelayEnabled?"socks5_udp":"socks5_tcp_only"),
+                     result,settings.type==2?"http_connect_tcp":"socks5_udp",
                      addressFamilyName(destination),port,port==0?"false":"true",reason);
 }
 static const sockaddr* connectedUdpPeer(int fd,sockaddr_storage* out,socklen_t* outLength){
@@ -115,6 +137,172 @@ static bool resolveProxyIPv4(const std::string& host,in_addr* address){
  freeaddrinfo(resolved);
  if(!found)errno=EHOSTUNREACH;
  return found;
+}
+struct ProxyEndpointResolution {
+ std::mutex lock;
+ std::condition_variable completedSignal;
+ bool completed=false;
+ bool found=false;
+ in_addr address{};
+};
+static bool resolveProxyIPv4Bounded(const std::string& host,in_addr* address,int timeoutMs){
+ if(address==nullptr||host.empty()){errno=EINVAL;return false;}
+ if(inet_pton(AF_INET,host.c_str(),address)==1)return true;
+
+ auto result=std::make_shared<ProxyEndpointResolution>();
+ std::thread([host,result](){
+  in_addr resolved{};
+  bool found=resolveProxyIPv4(host,&resolved);
+  {
+   std::lock_guard<std::mutex> lock(result->lock);
+   result->found=found;
+   result->address=resolved;
+   result->completed=true;
+  }
+  result->completedSignal.notify_one();
+ }).detach();
+
+ std::unique_lock<std::mutex> lock(result->lock);
+ if(!result->completedSignal.wait_for(lock,std::chrono::milliseconds(timeoutMs),[&](){return result->completed;})){
+  errno=ETIMEDOUT;
+  return false;
+ }
+ if(!result->found){errno=EHOSTUNREACH;return false;}
+ *address=result->address;
+ return true;
+}
+static std::string normalizeDnsName(const char* name){
+ if(name==nullptr)return {};
+ std::string normalized(name);
+ while(!normalized.empty()&&normalized.back()=='.')normalized.pop_back();
+ for(char& character:normalized){
+  if(character>='A'&&character<='Z')character=(char)(character-'A'+'a');
+ }
+ return normalized;
+}
+static bool isNumericDnsName(const char* name){
+ if(name==nullptr||*name=='\0')return false;
+ in_addr ipv4{};in6_addr ipv6{};
+ return inet_pton(AF_INET,name,&ipv4)==1||inet_pton(AF_INET6,name,&ipv6)==1;
+}
+static bool eligibleForRemoteDns(const char* node,const addrinfo* hints){
+ if(settings.type!=1||bypassRemoteDnsResolution||node==nullptr||*node=='\0')return false;
+ if(hints&&(hints->ai_flags&AI_NUMERICHOST))return false;
+ if(isNumericDnsName(node))return false;
+ std::string name=normalizeDnsName(node);
+ if(name.empty()||name.find('.')==std::string::npos)return false;
+ for(unsigned char character:name){if(character>0x7f)return false;}
+ if(name=="localhost"||name.size()>=10&&name.compare(name.size()-10,10,".localhost")==0)return false;
+ if(name.size()>=5&&name.compare(name.size()-5,5,".local")==0)return false;
+ if(!proxyEndpointName.empty()&&name==normalizeDnsName(proxyEndpointName.c_str()))return false;
+ return true;
+}
+static std::string remoteDnsAddressKey(const sockaddr* address){
+ if(address==nullptr)return {};
+ std::string key;
+ if(address->sa_family==AF_INET){
+  const auto* ipv4=(const sockaddr_in*)address;
+  key.push_back((char)AF_INET);key.append((const char*)&ipv4->sin_addr,sizeof(ipv4->sin_addr));return key;
+ }
+ if(address->sa_family==AF_INET6){
+  const auto* ipv6=(const sockaddr_in6*)address;
+  key.push_back((char)AF_INET6);key.append((const char*)&ipv6->sin6_addr,sizeof(ipv6->sin6_addr));return key;
+ }
+ return {};
+}
+static bool syntheticDnsAddress(const std::string& name,int family,std::string* numericAddress){
+ if(numericAddress==nullptr){errno=EINVAL;return false;}
+ uint32_t id=0;
+ {
+  std::lock_guard<std::mutex> lock(remoteDnsLock);
+  auto found=remoteDnsNameToId.find(name);
+  if(found!=remoteDnsNameToId.end())id=found->second;
+  else{
+   if(nextRemoteDnsId>0x1ffffu){errno=EAI_AGAIN;return false;}
+   id=nextRemoteDnsId++;
+   remoteDnsNameToId.emplace(name,id);
+  }
+ }
+ char buffer[INET6_ADDRSTRLEN]{};
+ if(family==AF_INET){
+  sockaddr_in address{};address.sin_family=AF_INET;
+  address.sin_addr.s_addr=htonl(0xc6120000u|id);
+  if(inet_ntop(AF_INET,&address.sin_addr,buffer,sizeof(buffer))==nullptr)return false;
+ }else if(family==AF_INET6){
+  sockaddr_in6 address{};address.sin6_family=AF_INET6;
+  const unsigned char prefix[4]={0x20,0x01,0x0d,0xb8};
+  std::memcpy(address.sin6_addr.s6_addr,prefix,sizeof(prefix));
+  for(int index=0;index<4;index++)address.sin6_addr.s6_addr[12+index]=(unsigned char)(id>>(24-index*8));
+  if(inet_ntop(AF_INET6,&address.sin6_addr,buffer,sizeof(buffer))==nullptr)return false;
+ }else{errno=EAFNOSUPPORT;return false;}
+ *numericAddress=buffer;
+ return true;
+}
+static void rememberRemoteDnsAddress(const sockaddr* address,const std::string& name){
+ std::string key=remoteDnsAddressKey(address);if(key.empty())return;
+ std::lock_guard<std::mutex> lock(remoteDnsLock);remoteDnsAddressToName[key]=name;
+}
+static std::string remoteDnsNameForAddress(const sockaddr* address){
+ std::string key=remoteDnsAddressKey(address);if(key.empty())return {};
+ std::lock_guard<std::mutex> lock(remoteDnsLock);
+ auto found=remoteDnsAddressToName.find(key);
+ return found==remoteDnsAddressToName.end()?std::string():found->second;
+}
+static int proxyGetAddrInfo(const char* node,const char* service,const addrinfo* hints,addrinfo** result){
+ if(realGetAddrInfo==nullptr)return EAI_FAIL;
+ if(result==nullptr)return EAI_FAIL;
+ *result=nullptr;
+ if(!eligibleForRemoteDns(node,hints))return realGetAddrInfo(node,service,hints,result);
+
+ const std::string name=normalizeDnsName(node);
+ std::vector<int> families;
+ const int requestedFamily=hints==nullptr?AF_UNSPEC:hints->ai_family;
+ if(requestedFamily==AF_UNSPEC){families.push_back(AF_INET6);families.push_back(AF_INET);}
+ else if(requestedFamily==AF_INET||requestedFamily==AF_INET6)families.push_back(requestedFamily);
+ else return realGetAddrInfo(node,service,hints,result);
+
+ addrinfo* head=nullptr;addrinfo* tail=nullptr;int lastError=EAI_NONAME;
+ for(int family:families){
+  std::string numericAddress;
+  if(!syntheticDnsAddress(name,family,&numericAddress)){lastError=EAI_AGAIN;continue;}
+  addrinfo numericHints{};if(hints!=nullptr)numericHints=*hints;
+  numericHints.ai_family=family;
+  numericHints.ai_flags|=AI_NUMERICHOST;
+  numericHints.ai_flags&=~AI_ADDRCONFIG;
+#ifdef AI_V4MAPPED
+  if(family!=AF_INET6)numericHints.ai_flags&=~AI_V4MAPPED;
+#endif
+#ifdef AI_ALL
+  if(family!=AF_INET6)numericHints.ai_flags&=~AI_ALL;
+#endif
+#ifdef AI_CANONNAME
+  numericHints.ai_flags&=~AI_CANONNAME;
+#endif
+  addrinfo* familyResults=nullptr;
+  int lookupResult=realGetAddrInfo(numericAddress.c_str(),service,&numericHints,&familyResults);
+  if(lookupResult!=0||familyResults==nullptr){lastError=lookupResult==0?EAI_NONAME:lookupResult;continue;}
+  if(hints!=nullptr&&(hints->ai_flags&AI_CANONNAME)&&head==nullptr){
+   familyResults->ai_canonname=strdup(node);
+   if(familyResults->ai_canonname==nullptr){freeaddrinfo(familyResults);if(head)freeaddrinfo(head);return EAI_MEMORY;}
+  }
+  for(addrinfo* item=familyResults;item!=nullptr;item=item->ai_next)rememberRemoteDnsAddress(item->ai_addr,name);
+  if(head==nullptr)head=familyResults;
+  else tail->ai_next=familyResults;
+  tail=familyResults;while(tail->ai_next!=nullptr)tail=tail->ai_next;
+ }
+ if(head==nullptr)return lastError;
+ *result=head;
+ if(!loggedRemoteDnsResolution.exchange(true)){
+  __android_log_print(ANDROID_LOG_INFO,PROXY_LOG_TAG,
+                      "event=dns_route result=remote_resolution transport=socks5_domain hostname_logged=false proxy_endpoint_logged=false credentials_logged=false");
+ }
+ return 0;
+}
+static int proxyAndroidGetAddrInfoForNet(const char* node,const char* service,const addrinfo* hints,
+                                         unsigned int netId,unsigned int mark,addrinfo** result){
+ if(realAndroidGetAddrInfoForNet==nullptr)return EAI_FAIL;
+ if(!eligibleForRemoteDns(node,hints))return realAndroidGetAddrInfoForNet(node,service,hints,netId,mark,result);
+ return proxyGetAddrInfo(node,service,hints,result);
 }
 static bool loopbackAddress(const sockaddr* address){
  if(!address)return false;
@@ -167,7 +355,12 @@ static bool ensureUdpRelay(){
  }
  if(!connected){int error=errno;realClose(fd);return failUdpRelay(error);}
  sockaddr_storage relay{};socklen_t relaySize=0;
- if(!CloneProxy::udpAssociate(fd,settings,&relay,&relaySize,PROXY_UDP_TIMEOUT_MS)){
+ bool associated=false;
+ {
+  RemoteDnsBypassScope bypass;
+  associated=CloneProxy::udpAssociate(fd,settings,&relay,&relaySize,PROXY_UDP_TIMEOUT_MS);
+ }
+ if(!associated){
   int error=errno;realClose(fd);return failUdpRelay(error);
  }
  udpRelay=relay;udpRelayLength=relaySize;udpControlFd=fd;udpRelayFailed=false;udpRelayError=0;
@@ -207,10 +400,17 @@ static bool getUdpPeer(int fd,UdpPeer* peer){
  *peer=found->second;return true;
 }
 
-static std::vector<unsigned char> socksUdpPacket(const void* data,size_t size,const sockaddr* destination){
- std::vector<unsigned char> packet;packet.reserve(size+22);
+static std::vector<unsigned char> socksUdpPacket(const void* data,size_t size,const sockaddr* destination,
+                                                const std::string& destinationHost){
+ std::vector<unsigned char> packet;packet.reserve(size+destinationHost.size()+22);
  packet.push_back(0);packet.push_back(0);packet.push_back(0);
- if(destination->sa_family==AF_INET){
+ if(!destinationHost.empty()){
+  if(destinationHost.size()>255){errno=EINVAL;return {};}
+  packet.push_back(3);packet.push_back((unsigned char)destinationHost.size());
+  packet.insert(packet.end(),destinationHost.begin(),destinationHost.end());
+  uint16_t port=htons((uint16_t)addressPort(destination));
+  const auto* bytes=(const unsigned char*)&port;packet.insert(packet.end(),bytes,bytes+2);
+ }else if(destination->sa_family==AF_INET){
   const auto* address=(const sockaddr_in*)destination;packet.push_back(1);
   const auto* bytes=(const unsigned char*)&address->sin_addr;packet.insert(packet.end(),bytes,bytes+4);
   const auto* port=(const unsigned char*)&address->sin_port;packet.insert(packet.end(),port,port+2);
@@ -238,14 +438,15 @@ static ssize_t sendUdp(int fd,const void* data,size_t size,int flags,const socka
  }
  sockaddr_storage relay{};socklen_t relayLength=0;
  if(!relayForSocket(fd,&relay,&relayLength))return -1;
- std::vector<unsigned char> packet=socksUdpPacket(data,size,destination);
+ const std::string destinationHost=remoteDnsNameForAddress(destination);
+ std::vector<unsigned char> packet=socksUdpPacket(data,size,destination,destinationHost);
  if(packet.empty())return -1;
  ssize_t sent=realSendTo(fd,packet.data(),packet.size(),flags,(sockaddr*)&relay,relayLength);
  if(sent<0)return -1;
  {
   std::lock_guard<std::mutex> lock(udpLock);proxiedUdpFds.insert(fd);
  }
- logUdpRouteOnce(fd,destination,"proxied","socks5_udp_relay");
+ logUdpRouteOnce(fd,destination,"proxied",destinationHost.empty()?"socks5_udp_relay":"socks5_udp_domain");
  return (ssize_t)size;
 }
 
@@ -323,7 +524,12 @@ static ssize_t receiveUdp(int fd,void* data,size_t capacity,int flags,sockaddr* 
   std::lock_guard<std::mutex> lock(udpLock);relay=udpRelay;relayLength=udpRelayLength;
  }
  if(relayLength>0&&sameAddress((sockaddr*)&sender,(sockaddr*)&relay)){
-  if(!decodeSocksUdpPacket(raw.data(),(size_t)received,&source,&sourceLength,&offset))return -1;
+  bool decoded=false;
+  {
+   RemoteDnsBypassScope bypass;
+   decoded=decodeSocksUdpPacket(raw.data(),(size_t)received,&source,&sourceLength,&offset);
+  }
+  if(!decoded)return -1;
   adaptAddressToSocket(fd,&source,&sourceLength);
   payloadSize=(size_t)received-offset;
  }
@@ -483,8 +689,8 @@ static int proxyConnect(int fd,const sockaddr* address,socklen_t length){
  if(loopbackAddress(address))return realConnect(fd,address,length);
  int type=socketType(fd);
  if(type==SOCK_DGRAM){
-  if(settings.type!=1||!socksUdpRelayEnabled){
-   logUdpRouteOnce(fd,address,"direct_bypass",settings.type==1?"udp_relay_disabled":"http_connect_carries_tcp_only");
+  if(settings.type!=1){
+   logUdpRouteOnce(fd,address,"direct_bypass","http_connect_carries_tcp_only");
    return realConnect(fd,address,length);
   }
   sockaddr_storage local{};socklen_t localLength=sizeof(local);
@@ -501,6 +707,7 @@ static int proxyConnect(int fd,const sockaddr* address,socklen_t length){
   std::lock_guard<std::mutex> lock(udpLock);udpPeers[fd]=peer;return 0;
  }
  if(type!=SOCK_STREAM){errno=ENETUNREACH;return -1;}
+ const std::string destinationHost=remoteDnsNameForAddress(address);
  const auto routeStarted=std::chrono::steady_clock::now();
  logTcpRoute("attempt",address);
  sockaddr_storage endpoint{};socklen_t endpointSize;
@@ -519,7 +726,8 @@ static int proxyConnect(int fd,const sockaddr* address,socklen_t length){
   if(result>0){int error=0;socklen_t size=sizeof(error);ok=getsockopt(fd,SOL_SOCKET,SO_ERROR,&error,&size)==0&&error==0;if(!ok)errno=error?error:ECONNREFUSED;}
   else errno=result==0?ETIMEDOUT:errno;
  }
- if(ok)ok=CloneProxy::handshake(fd,address,settings,PROXY_HANDSHAKE_TIMEOUT_MS);
+ if(ok)ok=CloneProxy::handshake(fd,address,settings,PROXY_HANDSHAKE_TIMEOUT_MS,nullptr,
+                                destinationHost.empty()?nullptr:&destinationHost);
  int failure=errno;fcntl(fd,F_SETFL,flags);
  long long elapsedMs=elapsedMilliseconds(routeStarted);
  if(!ok){shutdown(fd,SHUT_RDWR);logTcpRoute("failure",address,failure,elapsedMs);errno=failure;return -1;}
@@ -536,13 +744,22 @@ Java_top_niunaijun_blackbox_core_NativeCore_configureProxy(JNIEnv* env,jclass,ji
   return JNI_TRUE;
  }
  if(type!=1&&type!=2)return JNI_FALSE;
- socksUdpRelayEnabled=type==1&&udpRelayEnabled==JNI_TRUE;
+ // SOCKS5 always relays UDP/QUIC; keep the JNI parameter for binary/API compatibility.
+ (void)udpRelayEnabled;
  const char* text=env->GetStringUTFChars(host,nullptr);settings.host=text;env->ReleaseStringUTFChars(host,text);
+ proxyEndpointName=settings.host;
  settings.type=type;settings.port=port;
  settings.user.resize(env->GetArrayLength(user));settings.password.resize(env->GetArrayLength(password));
  if(!settings.user.empty())env->GetByteArrayRegion(user,0,settings.user.size(),(jbyte*)&settings.user[0]);
  if(!settings.password.empty())env->GetByteArrayRegion(password,0,settings.password.size(),(jbyte*)&settings.password[0]);
- in_addr ip{};if(port<1||port>65535||!resolveProxyIPv4(settings.host,&ip)||settings.user.size()>255||settings.password.size()>255)return JNI_FALSE;
+ in_addr ip{};
+ if(port<1||port>65535||settings.user.size()>255||settings.password.size()>255)return JNI_FALSE;
+ if(!resolveProxyIPv4Bounded(settings.host,&ip,PROXY_ENDPOINT_DNS_TIMEOUT_MS)){
+  __android_log_print(ANDROID_LOG_ERROR,PROXY_LOG_TAG,
+                      "event=proxy_configure result=failure stage=proxy_endpoint_dns error=%d elapsed_limit_ms=%d proxy_endpoint_logged=false credentials_logged=false",
+                      errno,PROXY_ENDPOINT_DNS_TIMEOUT_MS);
+  return JNI_FALSE;
+ }
  char numericHost[INET_ADDRSTRLEN];
  if(inet_ntop(AF_INET,&ip,numericHost,sizeof(numericHost))==nullptr)return JNI_FALSE;
  settings.host=numericHost;
@@ -554,11 +771,11 @@ Java_top_niunaijun_blackbox_core_NativeCore_configureProxy(JNIEnv* env,jclass,ji
  if(DobbyHook(socketAddress,(void*)proxySocket,(void**)&realSocket)!=0)return JNI_FALSE;
  // HTTP CONNECT only changes TCP connection setup. Leave send/close and all
  // UDP entry points untouched so local framework IPC never enters proxy hooks.
- if(type==2||!socksUdpRelayEnabled){
+ if(type==2){
   configured=true;
   __android_log_print(ANDROID_LOG_INFO,PROXY_LOG_TAG,
                       "event=proxy_configure result=success transport=%s udp_hooks=disabled proxy_endpoint_logged=false credentials_logged=false",
-                      type==2?"http_connect_tcp":"socks5_tcp_only");
+                      "http_connect_tcp");
   return JNI_TRUE;
  }
  void* closeAddress=dlsym(RTLD_DEFAULT,"close");void* sendAddress=dlsym(RTLD_DEFAULT,"send");
@@ -577,9 +794,18 @@ Java_top_niunaijun_blackbox_core_NativeCore_configureProxy(JNIEnv* env,jclass,ji
  if(DobbyHook(recvMsg,(void*)proxyRecvMsg,(void**)&realRecvMsg)!=0)return JNI_FALSE;
  if(DobbyHook(sendMmsg,(void*)proxySendMmsg,(void**)&realSendMmsg)!=0)return JNI_FALSE;
  if(DobbyHook(recvMmsg,(void*)proxyRecvMmsg,(void**)&realRecvMmsg)!=0)return JNI_FALSE;
+ void* androidGetAddrInfoAddress=dlsym(RTLD_DEFAULT,"android_getaddrinfofornet");
+ void* getAddrInfoAddress=dlsym(RTLD_DEFAULT,"getaddrinfo");
+ if(!androidGetAddrInfoAddress||!getAddrInfoAddress||
+    DobbyHook(androidGetAddrInfoAddress,(void*)proxyAndroidGetAddrInfoForNet,(void**)&realAndroidGetAddrInfoForNet)!=0||
+    DobbyHook(getAddrInfoAddress,(void*)proxyGetAddrInfo,(void**)&realGetAddrInfo)!=0){
+  __android_log_print(ANDROID_LOG_ERROR,PROXY_LOG_TAG,
+                      "event=dns_route result=hook_failure transport=socks5_domain hostname_logged=false proxy_endpoint_logged=false credentials_logged=false");
+  return JNI_FALSE;
+ }
  configured=true;
  __android_log_print(ANDROID_LOG_INFO,PROXY_LOG_TAG,
-                     "event=proxy_configure result=success transport=socks5_tcp_udp udp_observation=enabled proxy_endpoint_logged=false credentials_logged=false");
+                     "event=proxy_configure result=success transport=socks5_tcp_udp remote_dns=socks5_domain udp_observation=enabled proxy_endpoint_logged=false credentials_logged=false");
  return JNI_TRUE;
 }
 
