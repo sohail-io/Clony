@@ -7,6 +7,7 @@ import android.content.pm.PackageManager;
 import android.os.Environment;
 import android.os.Process;
 import android.text.TextUtils;
+import android.util.Log;
 
 import java.io.File;
 import java.io.BufferedReader;
@@ -129,6 +130,12 @@ public class IOCore {
                 BlackBoxCore.getContext(), packageName, BlackBoxCore.getUserId());
         CloneNetworkIdentityStore.Options networkOptions = CloneNetworkIdentityStore.read(
                 BlackBoxCore.getContext(), packageName, BlackBoxCore.getUserId());
+        if (isTikTokPackage(packageName)) {
+            Log.i("ClonyCloneIdentity", "event=identity_runtime_loaded package=" + packageName
+                    + " userId=" + BlackBoxCore.getUserId()
+                    + " proxy_region_enabled=" + networkOptions.matchProxyRegion
+                    + " proxy_country=" + (networkOptions.matchProxyRegion ? networkOptions.proxyCountryIso : "none"));
+        }
         NativeCore.setHideCpuGpuInfo(hardwareOptions.hideCpuGpuInfo);
         NativeCore.setHideSimOperatorInfo(networkOptions.hideSimOperatorInfo);
 

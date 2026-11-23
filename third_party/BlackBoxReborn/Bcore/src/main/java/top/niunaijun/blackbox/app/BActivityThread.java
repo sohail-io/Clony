@@ -29,6 +29,7 @@ import android.os.Looper;
 import android.os.Parcel;
 import android.os.RemoteException;
 import android.os.StrictMode;
+import android.os.SystemClock;
 import android.text.TextUtils;
 import android.util.Log;
 import android.webkit.WebView;
@@ -70,6 +71,7 @@ import top.niunaijun.blackbox.core.NativeCore;
 import top.niunaijun.blackbox.core.CloneFingerprintStore;
 import top.niunaijun.blackbox.core.CloneDeviceModelStore;
 import top.niunaijun.blackbox.core.CloneBuildPropsStore;
+import top.niunaijun.blackbox.core.CloneNetworkIdentityStore;
 import top.niunaijun.blackbox.core.env.VirtualRuntime;
 import top.niunaijun.blackbox.core.system.user.BUserHandle;
 import top.niunaijun.blackbox.entity.AppConfig;
@@ -79,6 +81,7 @@ import top.niunaijun.blackbox.utils.VirtualCloneDiagnostics;
 
 import top.niunaijun.blackbox.fake.delegate.AppInstrumentation;
 import top.niunaijun.blackbox.fake.delegate.ContentProviderDelegate;
+import top.niunaijun.blackbox.fake.frameworks.BLocationManager;
 
 import top.niunaijun.blackbox.fake.hook.HookManager;
 import top.niunaijun.blackbox.fake.service.HCallbackProxy;
@@ -221,12 +224,16 @@ public class BActivityThread extends IBActivityThread.Stub {
             if (this.mAppConfig != null) {
                 return;
             }
+            long proxyConfigureStarted = SystemClock.elapsedRealtime();
+            Log.i("ClonyCloneProxy", "event=proxy_configure_begin package=" + appConfig.packageName
+                    + " userId=" + appConfig.userId + " type=" + appConfig.proxyType);
             if (!NativeCore.configureProxy(appConfig.proxyType, appConfig.proxyHost, appConfig.proxyPort,
                     appConfig.proxyUser.getBytes(java.nio.charset.StandardCharsets.UTF_8),
                     appConfig.proxyPassword.getBytes(java.nio.charset.StandardCharsets.UTF_8),
                     appConfig.proxyType == 1)) {
                 android.util.Log.e("ClonyCloneProxy", "event=proxy_configure result=failure"
                         + " package=" + appConfig.packageName + " userId=" + appConfig.userId
+                        + " elapsed_ms=" + (SystemClock.elapsedRealtime() - proxyConfigureStarted)
                         + " endpoint_or_credentials_logged=false");
                 android.os.Process.killProcess(android.os.Process.myPid());
                 throw new IllegalStateException("Proxy transport initialization failed; direct fallback refused");
@@ -235,7 +242,18 @@ public class BActivityThread extends IBActivityThread.Stub {
                     + " package=" + appConfig.packageName + " userId=" + appConfig.userId
                     + " transport=" + (appConfig.proxyType == 2 ? "http_connect_tcp"
                     : appConfig.proxyType == 1 ? "socks5_tcp_udp" : "direct")
+                    + " elapsed_ms=" + (SystemClock.elapsedRealtime() - proxyConfigureStarted)
                     + " endpoint_or_credentials_logged=false");
+            CloneNetworkIdentityStore.Options feedIdentity = CloneNetworkIdentityStore.read(
+                    BlackBoxCore.getContext(), appConfig.packageName, appConfig.userId);
+            int locationPattern = BLocationManager.get().getPattern(appConfig.userId, appConfig.packageName);
+            Log.i("ClonyCloneIdentity", "event=clone_feed_identity_loaded package=" + appConfig.packageName
+                    + " userId=" + appConfig.userId
+                    + " proxy_region_enabled=" + feedIdentity.matchProxyRegion
+                    + " proxy_country=" + (feedIdentity.matchProxyRegion ? feedIdentity.proxyCountryIso : "none")
+                    + " location_pattern=" + locationPattern
+                    + " location_override_enabled=" + (locationPattern == BLocationManager.OWN_MODE)
+                    + " coordinates_logged=false");
             this.mLastKnownUserId = appConfig.userId;
             this.mHasLastKnownUserId = true;
             this.mAppConfig = appConfig;

@@ -60,10 +60,11 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -80,19 +81,29 @@ import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.core.graphics.drawable.IconCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.pm.ShortcutManagerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import androidx.activity.result.contract.ActivityResultContracts
 import com.clony.ui.theme.ClonyTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import top.niunaijun.blackbox.BlackBoxCore
@@ -101,8 +112,16 @@ import top.niunaijun.blackbox.core.CloneDeviceModelStore
 import top.niunaijun.blackbox.core.CloneHardwareIdentityStore
 import top.niunaijun.blackbox.core.CloneFingerprintStore
 import top.niunaijun.blackbox.core.CloneNetworkIdentityStore
+import top.niunaijun.blackbox.core.NativeCore
+import top.niunaijun.blackbox.core.network.CloneProxyConfig
+import top.niunaijun.blackbox.core.network.CloneProxyStore
 import top.niunaijun.blackbox.fake.service.VirtualDeviceIdentity
 import top.niunaijun.blackbox.fake.frameworks.BAccountManager
+import top.niunaijun.blackbox.fake.frameworks.BLocationManager
+import top.niunaijun.blackbox.entity.location.BLocation
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
 
@@ -115,6 +134,7 @@ internal const val ACTION_SHORTCUT_PINNED = "com.clony.action.SHORTCUT_PINNED"
 internal const val EXTRA_SHORTCUT_LABEL = "com.clony.extra.SHORTCUT_LABEL"
 private const val SHORTCUT_PREFERENCES = "clone_shortcuts"
 private const val TRACE_TAG = "ClonyTrace"
+private const val FEED_PROXY_PREFLIGHT_CACHE_TTL_MS = 60_000L
 
 private enum class CloneFeatureScreen {
     CLONE_SETTINGS,
@@ -123,6 +143,26 @@ private enum class CloneFeatureScreen {
     CONNECTION_OPERATOR_INFO,
     DEVICE_PROFILE_HARDWARE
 }
+
+private data class PreparedFeedProxy(
+    val config: CloneProxyConfig,
+    val region: ProxyGeoRegion,
+    val traceId: String
+)
+
+private data class CachedFeedProxy(
+    val settingsFingerprint: String,
+    val validatedAtElapsedMs: Long,
+    val prepared: PreparedFeedProxy
+)
+
+private fun CloneNetworkIdentitySettings.withFeedCountry(countryIso: String?) =
+    countryIso?.let {
+        copy(
+            matchProxyRegion = true,
+            proxyCountryIso = it.lowercase(Locale.ROOT)
+        )
+    } ?: this
 
 private fun packageNameDrafts(
     app: AppTile,
@@ -159,9 +199,13 @@ data class AppTile(
     val displayName: String get() = if (isCloned) "$label ${copyNumber ?: 1}" else label
 }
 
+private fun cloneIpv4Key(app: AppTile): String = "${app.packageName}:${app.virtualUserId ?: -1}"
+
 class MainActivity : ComponentActivity() {
     private val networkIdentitySettingsMutex = Mutex()
     private val hardwareIdentitySettingsMutex = Mutex()
+    private val feedProxySettingsMutex = Mutex()
+    private var lastSuccessfulFeedProxy: CachedFeedProxy? = null
     private var launcherQueue = LauncherInstallQueue()
     private var waitingForInstallPermission = false
     private val pendingHomeShortcutPins = mutableListOf<AppTile>()
@@ -256,6 +300,8 @@ class MainActivity : ComponentActivity() {
                     onSaveNetworkIdentitySettings = ::saveNetworkIdentitySettings,
                     onSaveHardwareIdentitySettings = ::saveHardwareIdentitySettings,
                     onSaveRecaptchaWorkaround = ::saveRecaptchaWorkaround,
+                    onSaveCloneFeedProxy = ::saveCloneFeedProxy,
+                    onTestCloneFeedProxy = ::testCloneFeedProxy,
                     onPinClone = { tile -> pinCloneShortcut(tile) },
                     onDeleteClone = ::deleteClone
                 )
@@ -658,6 +704,11 @@ class MainActivity : ComponentActivity() {
                     Log.i(TRACE_TAG, "clone_delete stage=stop_begin package=${tile.packageName} userId=$userId")
                     runtime.stopPackage(tile.packageName, userId)
                     Log.i(TRACE_TAG, "clone_delete stage=stop_complete package=${tile.packageName} userId=$userId")
+                    runCatching {
+                        applySpoofLocation(tile.packageName, userId, CloneSpoofLocationSettings())
+                    }.onFailure {
+                        Log.w(TRACE_TAG, "clone_delete stage=spoof_location_disable_failed package=${tile.packageName} userId=$userId", it)
+                    }
                     val otherPackagesRemain = appsState.value.any {
                         it.isCloned && it.virtualUserId == userId && it.packageName != tile.packageName
                     }
@@ -701,6 +752,11 @@ class MainActivity : ComponentActivity() {
                         CloneRecaptchaWorkaroundStore.delete(this@MainActivity, tile.packageName, userId)
                     }.onFailure {
                         Log.w(TRACE_TAG, "clone_delete stage=recaptcha_preference_cleanup_failed package=${tile.packageName} userId=$userId", it)
+                    }
+                    runCatching {
+                        CloneSpoofLocationStore.delete(this@MainActivity, tile.packageName, userId)
+                    }.onFailure {
+                        Log.w(TRACE_TAG, "clone_delete stage=spoof_location_cleanup_failed package=${tile.packageName} userId=$userId", it)
                     }
                     if (!CloneBuildPropsStore.delete(this@MainActivity, tile.packageName, userId)) {
                         Log.w(TRACE_TAG, "clone_delete stage=build_props_cleanup_failed package=${tile.packageName} userId=$userId")
@@ -948,6 +1004,241 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun resolveFeedProxy(
+        settings: CloneFeedRegionSettings,
+        operation: String
+    ): PreparedFeedProxy? {
+        val traceId = UUID.randomUUID().toString().take(8)
+        val started = SystemClock.elapsedRealtime()
+        Log.i(TRACE_TAG, "feed_proxy_preflight event=begin trace_id=$traceId operation=$operation configured=${settings.isConfigured}")
+        if (!settings.isConfigured) {
+            lastSuccessfulFeedProxy = null
+            Log.i(TRACE_TAG, "feed_proxy_preflight event=complete trace_id=$traceId result=skipped reason=no_proxy elapsed_ms=${SystemClock.elapsedRealtime() - started}")
+            return null
+        }
+
+        val settingsFingerprint = feedProxySettingsFingerprint(settings.socks5Proxy)
+        val cached = lastSuccessfulFeedProxy
+        if (operation != "test" && cached != null && cached.settingsFingerprint == settingsFingerprint) {
+            val ageMs = SystemClock.elapsedRealtime() - cached.validatedAtElapsedMs
+            if (ageMs >= 0 && ageMs < FEED_PROXY_PREFLIGHT_CACHE_TTL_MS) {
+                Log.i(
+                    TRACE_TAG,
+                    "feed_proxy_preflight cache=hit trace_id=${cached.prepared.traceId} operation=$operation age_ms=$ageMs country=${cached.prepared.region.countryIso.uppercase(Locale.ROOT)}"
+                )
+                Log.i(
+                    TRACE_TAG,
+                    "feed_proxy_preflight event=complete trace_id=${cached.prepared.traceId} result=success cache=hit country=${cached.prepared.region.countryIso.uppercase(Locale.ROOT)} elapsed_ms=${SystemClock.elapsedRealtime() - started}"
+                )
+                return cached.prepared
+            }
+        }
+        lastSuccessfulFeedProxy = null
+
+        try {
+            val config = feedProxyStage(traceId, "parse_settings") {
+                CloneProxyConfig.parse(1, settings.socks5Proxy)
+            }
+            val endpointAddress = feedProxyStage(traceId, "proxy_endpoint_dns") {
+                InetAddress.getAllByName(config.host)
+                    .firstOrNull { it is Inet4Address }
+                    ?.hostAddress
+                    ?: error("The SOCKS5 proxy hostname did not resolve to an IPv4 address.")
+            }
+            val preparedConfig = config.withResolvedHost(endpointAddress)
+            val probeStarted = SystemClock.elapsedRealtime()
+            val probeResult = NativeCore.probeProxy(
+                preparedConfig.type,
+                preparedConfig.resolvedHost,
+                preparedConfig.port,
+                preparedConfig.username.toByteArray(Charsets.UTF_8),
+                preparedConfig.password.toByteArray(Charsets.UTF_8)
+            )
+            val probeElapsedMs = SystemClock.elapsedRealtime() - probeStarted
+            if (probeResult == 0) {
+                Log.i(TRACE_TAG, "feed_proxy_preflight stage=native_tcp_udp_probe result=success trace_id=$traceId elapsed_ms=$probeElapsedMs")
+            } else {
+                Log.w(TRACE_TAG, "feed_proxy_preflight stage=native_tcp_udp_probe result=failure trace_id=$traceId result_code=$probeResult elapsed_ms=$probeElapsedMs")
+            }
+            if (probeResult != 0) error(proxyProbeFailureMessage(preparedConfig.type, probeResult))
+            val detectedRegion = feedProxyStage(traceId, "proxy_region_lookup") {
+                ProxyRegionResolver.detectRegion(preparedConfig, traceId)
+            }
+            Log.i(
+                TRACE_TAG,
+                "feed_proxy_preflight event=complete trace_id=$traceId result=success country=${detectedRegion.countryIso.uppercase(Locale.ROOT)} elapsed_ms=${SystemClock.elapsedRealtime() - started}"
+            )
+            val prepared = PreparedFeedProxy(preparedConfig, detectedRegion, traceId)
+            lastSuccessfulFeedProxy = CachedFeedProxy(
+                settingsFingerprint = settingsFingerprint,
+                validatedAtElapsedMs = SystemClock.elapsedRealtime(),
+                prepared = prepared
+            )
+            return prepared
+        } catch (error: Throwable) {
+            lastSuccessfulFeedProxy = null
+            Log.w(
+                TRACE_TAG,
+                "feed_proxy_preflight event=complete trace_id=$traceId result=failure error_type=${error.javaClass.simpleName} elapsed_ms=${SystemClock.elapsedRealtime() - started}"
+            )
+            throw error
+        }
+    }
+
+    private fun feedProxySettingsFingerprint(proxy: String): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(proxy.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(Locale.ROOT, byte.toInt() and 0xff) }
+
+    private inline fun <T> feedProxyStage(traceId: String, stage: String, block: () -> T): T {
+        val started = SystemClock.elapsedRealtime()
+        return try {
+            val value = block()
+            Log.i(
+                TRACE_TAG,
+                "feed_proxy_preflight stage=$stage result=success trace_id=$traceId elapsed_ms=${SystemClock.elapsedRealtime() - started}"
+            )
+            value
+        } catch (error: Throwable) {
+            Log.w(
+                TRACE_TAG,
+                "feed_proxy_preflight stage=$stage result=failure trace_id=$traceId error_type=${error.javaClass.simpleName} elapsed_ms=${SystemClock.elapsedRealtime() - started}"
+            )
+            throw error
+        }
+    }
+
+    private fun automaticLocationForProxy(proxy: PreparedFeedProxy?) = proxy?.let {
+        CloneSpoofLocationSettings(
+            enabled = true,
+            latitude = it.region.latitude,
+            longitude = it.region.longitude
+        )
+    } ?: CloneSpoofLocationSettings()
+
+    private fun testCloneFeedProxy(tile: AppTile, settings: CloneFeedRegionSettings) {
+        if (busyPackageState.value != null) return
+        if (!settings.isConfigured) {
+            showError("Enter a SOCKS5 proxy before testing it.", null)
+            return
+        }
+        showProgress(tile.packageName, "Testing proxy and detecting its country and location…")
+        lifecycleScope.launch {
+            try {
+                val prepared = feedProxySettingsMutex.withLock {
+                    withContext(Dispatchers.IO) { resolveFeedProxy(settings, "test") }
+                } ?: error("Enter a SOCKS5 proxy before testing it.")
+                val region = prepared.region
+                showInfo(
+                    "Proxy test passed. Country: ${region.countryIso.uppercase(Locale.ROOT)}; " +
+                        "approximate GPS: ${String.format(Locale.ROOT, "%.4f, %.4f", region.latitude, region.longitude)}. " +
+                        "You can clone now."
+                )
+            } catch (error: Throwable) {
+                Log.e(TRACE_TAG, "feed_proxy_test_failed package=${tile.packageName}", error)
+                showError(error.message?.takeIf(String::isNotBlank) ?: "Proxy test failed.", null)
+            }
+        }
+    }
+
+    private fun saveCloneFeedProxy(tile: AppTile, settings: CloneFeedRegionSettings) {
+        val userId = tile.virtualUserId ?: return
+        if (busyPackageState.value != null) return
+        showProgress(tile.packageName, "Testing proxy and detecting its location…")
+        lifecycleScope.launch {
+            try {
+                val detectedRegion = feedProxySettingsMutex.withLock {
+                    withContext(Dispatchers.IO) {
+                        val prepared = resolveFeedProxy(settings, "apply")
+                        val previousProxy = CloneProxyStore.read(this@MainActivity, tile.packageName, userId)
+                        val previousNetworkIdentity = CloneNetworkIdentityStore.read(
+                            this@MainActivity, tile.packageName, userId
+                        )
+                        val previousLocation = CloneSpoofLocationStore.read(
+                            this@MainActivity, tile.packageName, userId
+                        )
+                        val automaticLocation = automaticLocationForProxy(prepared)
+                        Log.i(TRACE_TAG, "feed_proxy_save stage=begin trace_id=${prepared?.traceId ?: "none"} package=${tile.packageName} userId=$userId proxy_enabled=${prepared != null} country=${prepared?.region?.countryIso.orEmpty().ifBlank { "none" }} location_enabled=${automaticLocation.enabled}")
+                        try {
+                            CloneProxyStore.save(
+                                this@MainActivity,
+                                tile.packageName,
+                                userId,
+                                prepared?.config ?: CloneProxyConfig.parse(0, "")
+                            )
+                            if (!CloneNetworkIdentityStore.updateProxyRegion(
+                                    this@MainActivity,
+                                    tile.packageName,
+                                    userId,
+                                    prepared?.region?.countryIso.orEmpty()
+                                )
+                            ) {
+                                error("Couldn't save the proxy's detected country.")
+                            }
+                            if (!CloneSpoofLocationStore.write(
+                                    this@MainActivity, tile.packageName, userId, automaticLocation
+                                )
+                            ) {
+                                error("Couldn't save the proxy's detected location.")
+                            }
+                        } catch (error: Throwable) {
+                            runCatching {
+                                CloneProxyStore.save(this@MainActivity, tile.packageName, userId, previousProxy)
+                            }
+                            runCatching {
+                                CloneNetworkIdentityStore.write(
+                                    this@MainActivity, tile.packageName, userId, previousNetworkIdentity
+                                )
+                            }
+                            runCatching {
+                                CloneSpoofLocationStore.write(
+                                    this@MainActivity, tile.packageName, userId, previousLocation
+                                )
+                            }
+                            throw error
+                        }
+                        applySpoofLocation(tile.packageName, userId, automaticLocation)
+                        Log.i(TRACE_TAG, "feed_proxy_save stage=restart_begin trace_id=${prepared?.traceId ?: "none"} package=${tile.packageName} userId=$userId")
+                        BlackBoxCore.get().stopPackage(tile.packageName, userId)
+                        Log.i(TRACE_TAG, "feed_proxy_save stage=restart_requested trace_id=${prepared?.traceId ?: "none"} package=${tile.packageName} userId=$userId")
+                        Log.i(TRACE_TAG, "feed_proxy_save event=complete trace_id=${prepared?.traceId ?: "none"} result=success package=${tile.packageName} userId=$userId")
+                        prepared?.region
+                    }
+                }
+                showInfo(
+                    detectedRegion?.let {
+                        "Proxy saved. Feed region detected as ${it.countryIso.uppercase(Locale.ROOT)}. " +
+                            "GPS now follows the proxy's approximate location."
+                    } ?: "Proxy removed. This copy will use the phone's normal connection and location."
+                )
+            } catch (error: Throwable) {
+                Log.e(TRACE_TAG, "feed_proxy_save_failed package=${tile.packageName} userId=$userId", error)
+                showError(error.message?.takeIf(String::isNotBlank) ?: "Couldn't save the proxy.", null)
+            }
+        }
+    }
+
+    private fun applySpoofLocation(
+        packageName: String,
+        userId: Int,
+        settings: CloneSpoofLocationSettings
+    ) {
+        val normalized = settings.normalized()
+        val locationManager = BLocationManager.get()
+        if (normalized.enabled && normalized.hasValidCoordinates) {
+            locationManager.setLocation(
+                userId,
+                packageName,
+                BLocation(normalized.latitude!!, normalized.longitude!!)
+            )
+            locationManager.setPattern(userId, packageName, BLocationManager.OWN_MODE)
+            Log.i(TRACE_TAG, "clone_feed_identity event=location_override package=$packageName userId=$userId enabled=true coordinates_logged=false")
+        } else {
+            locationManager.setPattern(userId, packageName, BLocationManager.CLOSE_MODE)
+            Log.i(TRACE_TAG, "clone_feed_identity event=location_override package=$packageName userId=$userId enabled=false")
+        }
+    }
+
     private fun shortcutPreferenceKey(packageName: String, userId: Int) = "$packageName:$userId"
 
     private fun createCopies(
@@ -956,7 +1247,8 @@ class MainActivity : ComponentActivity() {
         buildProps: CloneBuildProps = CloneBuildProps(),
         identitySettings: CloneNetworkIdentitySettings = CloneNetworkIdentitySettings(),
         hardwareSettings: CloneHardwareIdentitySettings = CloneHardwareIdentitySettings(),
-        recaptchaWorkaround: Boolean = false
+        recaptchaWorkaround: Boolean = false,
+        feedRegionSettings: CloneFeedRegionSettings = CloneFeedRegionSettings()
     ) {
         if (busyPackageState.value != null) return
         val requestedPackageNames = packageNames.map { it.trim() }
@@ -986,13 +1278,30 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        val cloneCreateStarted = SystemClock.elapsedRealtime()
+        Log.i(TRACE_TAG, "clone_create event=begin package=${tile.packageName} copies=$copiesToCreate proxy_configured=${feedRegionSettings.isConfigured}")
         showProgress(
             tile.packageName,
-            "Creating $copiesToCreate ${tile.label} ${if (copiesToCreate == 1) "copy" else "copies"}…"
+            if (feedRegionSettings.isConfigured) {
+                "Preparing the proxy region before creating ${tile.label}…"
+            } else {
+                "Creating $copiesToCreate ${tile.label} ${if (copiesToCreate == 1) "copy" else "copies"}…"
+            }
         )
         lifecycleScope.launch {
             try {
                 val (createdUserIds, googleServicesAvailable) = withContext(Dispatchers.IO) {
+                    val regionalFeedProxy = feedProxySettingsMutex.withLock {
+                        resolveFeedProxy(feedRegionSettings, "clone_create")
+                    }
+                    val copyIdentitySettings = identitySettings.withFeedCountry(
+                        regionalFeedProxy?.region?.countryIso
+                    )
+                    val automaticLocation = automaticLocationForProxy(regionalFeedProxy)
+                    Log.i(
+                        TRACE_TAG,
+                        "clone_create stage=feed_identity_prepared trace_id=${regionalFeedProxy?.traceId ?: "none"} package=${tile.packageName} proxy_enabled=${regionalFeedProxy != null} country=${regionalFeedProxy?.region?.countryIso.orEmpty().ifBlank { "none" }} location_enabled=${automaticLocation.enabled}"
+                    )
                     val runtime = BlackBoxCore.get()
                     val users = runtime.getUsers().orEmpty()
                     if (!CloneBuildPropsStore.writeTemplate(
@@ -1001,7 +1310,9 @@ class MainActivity : ComponentActivity() {
                         error("Couldn't save the build properties for future copies.")
                     }
                     if (!CloneNetworkIdentityStore.writeTemplate(
-                            this@MainActivity, tile.packageName, identitySettings.toStoreOptions()
+                            this@MainActivity,
+                            tile.packageName,
+                            identitySettings.withFeedCountry(null).toStoreOptions()
                         )) {
                         error("Couldn't save network identity settings for future copies.")
                     }
@@ -1023,7 +1334,7 @@ class MainActivity : ComponentActivity() {
                     val createdUserIds = mutableListOf<Int>()
                     var allGoogleServicesAvailable = true
                     try {
-                repeat(copiesToCreate) { index ->
+                        repeat(copiesToCreate) { index ->
                             val user = runtime.createUser(nextId++)
                                 ?: error("The virtual runtime couldn't create copy ${index + 1}.")
                             createdUserIds += user.id
@@ -1046,11 +1357,21 @@ class MainActivity : ComponentActivity() {
                                 error("Couldn't save build properties for copy ${index + 1}.")
                             }
                             if (!CloneNetworkIdentityStore.write(
-                                    this@MainActivity, tile.packageName, user.id, identitySettings.toStoreOptions()
+                                    this@MainActivity,
+                                    tile.packageName,
+                                    user.id,
+                                    copyIdentitySettings.toStoreOptions()
                                 )
                             ) {
                                 error("Couldn't save network identity settings for copy ${index + 1}.")
                             }
+                            CloneProxyStore.save(
+                                this@MainActivity,
+                                tile.packageName,
+                                user.id,
+                                regionalFeedProxy?.config ?: CloneProxyConfig.parse(0, "")
+                            )
+                            Log.i(TRACE_TAG, "clone_create stage=proxy_settings_saved trace_id=${regionalFeedProxy?.traceId ?: "none"} package=${tile.packageName} userId=${user.id} proxy_enabled=${regionalFeedProxy != null}")
                             if (!CloneHardwareIdentityStore.write(
                                     this@MainActivity,
                                     tile.packageName,
@@ -1069,7 +1390,20 @@ class MainActivity : ComponentActivity() {
                             ) {
                                 error("Couldn't save the reCAPTCHA preference for copy ${index + 1}.")
                             }
+                            if (!CloneSpoofLocationStore.write(
+                                    this@MainActivity,
+                                    tile.packageName,
+                                    user.id,
+                                    automaticLocation
+                                )
+                            ) {
+                                error("Couldn't save the proxy location for copy ${index + 1}.")
+                            }
+                            applySpoofLocation(tile.packageName, user.id, automaticLocation)
+                            val packageInstallStarted = SystemClock.elapsedRealtime()
+                            Log.i(TRACE_TAG, "clone_create stage=package_install_begin trace_id=${regionalFeedProxy?.traceId ?: "none"} package=${tile.packageName} userId=${user.id}")
                             val result = runtime.installInstalledPackageAsUser(tile.packageName, user.id)
+                            Log.i(TRACE_TAG, "clone_create stage=package_install_complete trace_id=${regionalFeedProxy?.traceId ?: "none"} package=${tile.packageName} userId=${user.id} success=${result?.success == true} elapsed_ms=${SystemClock.elapsedRealtime() - packageInstallStarted}")
                             if (result == null) {
                                 error("The virtual package service stopped while creating copy ${index + 1}.")
                             }
@@ -1127,6 +1461,18 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
                             runCatching {
+                                applySpoofLocation(
+                                    tile.packageName,
+                                    createdUserId,
+                                    CloneSpoofLocationSettings()
+                                )
+                                CloneSpoofLocationStore.delete(
+                                    this@MainActivity,
+                                    tile.packageName,
+                                    createdUserId
+                                )
+                            }
+                            runCatching {
                                 top.niunaijun.blackbox.core.network.CloneProxyStore.delete(
                                     this@MainActivity, tile.packageName, createdUserId
                                 )
@@ -1150,8 +1496,10 @@ class MainActivity : ComponentActivity() {
                         "Confirm each Home screen prompt to add its icon with the original app name and icon." +
                         googleServicesNotice
                 )
+                Log.i(TRACE_TAG, "clone_create event=complete result=success package=${tile.packageName} copies=$copiesToCreate elapsed_ms=${SystemClock.elapsedRealtime() - cloneCreateStarted}")
                 queueHomeShortcutsForCopies(tile, createdUserIds)
             } catch (error: Throwable) {
+                Log.w(TRACE_TAG, "clone_create event=complete result=failure package=${tile.packageName} copies=$copiesToCreate error_type=${error.javaClass.simpleName} elapsed_ms=${SystemClock.elapsedRealtime() - cloneCreateStarted}")
                 val detail = error.message?.takeIf(String::isNotBlank)
                 showError(
                     detail?.let { "Couldn't clone ${tile.label}: $it" }
@@ -1159,7 +1507,7 @@ class MainActivity : ComponentActivity() {
                             append("Couldn't clone ${tile.label}. This app may use a package format the runtime can't load.")
                             if (tile.hasSplitApks) append(" It is installed as split APKs, which may be unsupported.")
                         },
-                    tile.packageName,
+                    if (feedRegionSettings.isConfigured) null else tile.packageName,
                     copiesToCreate
                 )
                 retryPackageNamesState.value = requestedPackageNames
@@ -1168,7 +1516,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun installIntoContainer(tile: AppTile, userId: Int) {
+    private fun installIntoContainer(
+        tile: AppTile,
+        userId: Int,
+        feedRegionSettings: CloneFeedRegionSettings
+    ) {
         if (busyPackageState.value != null) return
         val copyCount = appsState.value.count { it.packageName == tile.packageName && it.isCloned }
         if (copyCount >= MAX_COPIES_PER_APP) {
@@ -1184,10 +1536,22 @@ class MainActivity : ComponentActivity() {
             occupiedPackageNames,
             CloneCopyNameStore.nextNumber(this, tile.packageName)
         ).first()
-        showProgress(tile.packageName, "Adding ${tile.label} to container $userId…")
+        showProgress(
+            tile.packageName,
+            if (feedRegionSettings.isConfigured) "Testing proxy and detecting its location before adding ${tile.label}…"
+            else "Adding ${tile.label} to container $userId…"
+        )
         lifecycleScope.launch {
             try {
                 withContext(Dispatchers.IO) {
+                    val regionalFeedProxy = feedProxySettingsMutex.withLock {
+                        resolveFeedProxy(feedRegionSettings, "container_add")
+                    }
+                    val networkSettings = CloneNetworkIdentitySettings.fromStore(
+                        CloneNetworkIdentityStore.readTemplate(this@MainActivity, tile.packageName)
+                    ).withFeedCountry(regionalFeedProxy?.region?.countryIso)
+                    val automaticLocation = automaticLocationForProxy(regionalFeedProxy)
+                    Log.i(TRACE_TAG, "container_add stage=feed_identity_prepared trace_id=${regionalFeedProxy?.traceId ?: "none"} package=${tile.packageName} userId=$userId proxy_enabled=${regionalFeedProxy != null} country=${regionalFeedProxy?.region?.countryIso.orEmpty().ifBlank { "none" }} location_enabled=${automaticLocation.enabled}")
                     val runtime = BlackBoxCore.get()
                     if (runtime.getUsers().orEmpty().none { it.id == userId }) {
                         error("Container $userId no longer exists.")
@@ -1206,17 +1570,33 @@ class MainActivity : ComponentActivity() {
                         error("Couldn't save build properties for ${tile.label}.")
                     }
                     if (!CloneNetworkIdentityStore.write(this@MainActivity, tile.packageName, userId,
-                            CloneNetworkIdentityStore.readTemplate(this@MainActivity, tile.packageName))) {
+                            networkSettings.toStoreOptions())) {
                         error("Couldn't save network settings for ${tile.label}.")
                     }
                     if (!CloneHardwareIdentityStore.write(this@MainActivity, tile.packageName, userId,
                             CloneHardwareIdentityStore.readTemplate(this@MainActivity, tile.packageName))) {
                         error("Couldn't save hardware settings for ${tile.label}.")
                     }
+                    CloneProxyStore.save(
+                        this@MainActivity,
+                        tile.packageName,
+                        userId,
+                        regionalFeedProxy?.config ?: CloneProxyConfig.parse(0, "")
+                    )
+                    val packageInstallStarted = SystemClock.elapsedRealtime()
+                    Log.i(TRACE_TAG, "container_add stage=package_install_begin trace_id=${regionalFeedProxy?.traceId ?: "none"} package=${tile.packageName} userId=$userId")
                     val install = runtime.installInstalledPackageAsUser(tile.packageName, userId)
                         ?: error("The virtual package service stopped while adding ${tile.label}.")
+                    Log.i(TRACE_TAG, "container_add stage=package_install_complete trace_id=${regionalFeedProxy?.traceId ?: "none"} package=${tile.packageName} userId=$userId success=${install.success} elapsed_ms=${SystemClock.elapsedRealtime() - packageInstallStarted}")
                     if (!install.success) error(install.msg?.takeIf(String::isNotBlank)
                         ?: "The runtime couldn't add ${tile.label} to this container.")
+                    if (!CloneSpoofLocationStore.write(
+                            this@MainActivity, tile.packageName, userId, automaticLocation
+                        )) {
+                        runtime.uninstallPackageAsUser(tile.packageName, userId)
+                        error("Couldn't save the proxy location for ${tile.label}.")
+                    }
+                    applySpoofLocation(tile.packageName, userId, automaticLocation)
                     if (!ClonePackageNameStore.write(this@MainActivity, tile.packageName, userId,
                             proposedPackageName)) {
                         runtime.uninstallPackageAsUser(tile.packageName, userId)
@@ -1311,12 +1691,14 @@ private fun ClonyHomeRedesigned(
     onRetry: (String) -> Unit,
     onRefresh: () -> Unit,
     onOpenClone: (AppTile) -> Unit,
-    onCreateCopies: (AppTile, List<String>, CloneBuildProps, CloneNetworkIdentitySettings, CloneHardwareIdentitySettings, Boolean) -> Unit,
-    onInstallIntoContainer: (AppTile, Int) -> Unit,
+    onCreateCopies: (AppTile, List<String>, CloneBuildProps, CloneNetworkIdentitySettings, CloneHardwareIdentitySettings, Boolean, CloneFeedRegionSettings) -> Unit,
+    onInstallIntoContainer: (AppTile, Int, CloneFeedRegionSettings) -> Unit,
     onSaveBuildPropsTemplate: (AppTile, CloneBuildProps) -> Unit,
     onSaveNetworkIdentitySettings: (AppTile, Int?, CloneNetworkIdentitySettings) -> Unit,
     onSaveHardwareIdentitySettings: (AppTile, Int?, CloneHardwareIdentitySettings) -> Unit,
     onSaveRecaptchaWorkaround: (AppTile, Int?, Boolean) -> Unit,
+    onSaveCloneFeedProxy: (AppTile, CloneFeedRegionSettings) -> Unit,
+    onTestCloneFeedProxy: (AppTile, CloneFeedRegionSettings) -> Unit,
     onPinClone: (AppTile) -> Unit,
     onDeleteClone: (AppTile) -> Unit
 ) {
@@ -1327,7 +1709,6 @@ private fun ClonyHomeRedesigned(
     var countSheetApp by remember { mutableStateOf<AppTile?>(null) }
     var containerChoiceApp by remember { mutableStateOf<AppTile?>(null) }
     var deleteApp by remember { mutableStateOf<AppTile?>(null) }
-    var networkApp by remember { mutableStateOf<AppTile?>(null) }
     var showBuildProps by remember { mutableStateOf(false) }
     var cloneFeatureScreen by remember { mutableStateOf(CloneFeatureScreen.CLONE_SETTINGS) }
     var cloneCount by remember { mutableStateOf(1) }
@@ -1336,8 +1717,29 @@ private fun ClonyHomeRedesigned(
     var networkIdentitySettings by remember { mutableStateOf(CloneNetworkIdentitySettings()) }
     var hardwareIdentitySettings by remember { mutableStateOf(CloneHardwareIdentitySettings()) }
     var recaptchaWorkaroundEnabled by remember { mutableStateOf(false) }
+    var feedRegionSettings by remember { mutableStateOf(CloneFeedRegionSettings()) }
     val context = LocalContext.current
-    val screenScope = rememberCoroutineScope()
+    val lifecycleOwner = context as? LifecycleOwner
+    var activityResumed by remember(lifecycleOwner) {
+        mutableStateOf(
+            lifecycleOwner?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) ?: true
+        )
+    }
+    DisposableEffect(lifecycleOwner) {
+        val lifecycle = lifecycleOwner?.lifecycle
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> activityResumed = true
+                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP, Lifecycle.Event.ON_DESTROY ->
+                    activityResumed = false
+                else -> Unit
+            }
+        }
+        lifecycle?.addObserver(observer)
+        onDispose { lifecycle?.removeObserver(observer) }
+    }
+    var ipv4ByClone by remember { mutableStateOf(emptyMap<String, String>()) }
+    val ipv4LookupSemaphore = remember { Semaphore(4) }
     val systemApps = remember(apps) {
         apps.groupBy { it.packageName }.values.map { copies ->
             copies.first().copy(
@@ -1348,6 +1750,25 @@ private fun ClonyHomeRedesigned(
     }
     val clones = remember(apps) {
         apps.filter { it.isCloned }.sortedWith(compareBy<AppTile> { it.label.lowercase() }.thenBy { it.copyNumber })
+    }
+    LaunchedEffect(selectedTab, detailPackage, clones, activityResumed) {
+        if (selectedTab != 0 || detailPackage != null || !activityResumed || clones.isEmpty()) {
+            return@LaunchedEffect
+        }
+        while (true) {
+            ipv4ByClone = clones.associate { cloneIpv4Key(it) to "Checking…" }
+            coroutineScope {
+                clones.map { clone ->
+                    async {
+                        val address = ipv4LookupSemaphore.withPermit {
+                            ClonePublicIpv4Lookup.fetch(context.applicationContext, clone)
+                        } ?: "Unavailable"
+                        ipv4ByClone = ipv4ByClone + (cloneIpv4Key(clone) to address)
+                    }
+                }.awaitAll()
+            }
+            delay(60_000L)
+        }
     }
     val containers = remember(clones) {
         clones.mapNotNull { app -> app.virtualUserId?.let { it to app } }
@@ -1454,6 +1875,17 @@ private fun ClonyHomeRedesigned(
         recaptchaWorkaroundEnabled = cloneToEdit?.virtualUserId?.let {
             CloneRecaptchaWorkaroundStore.read(context, app.packageName, it)
         } ?: CloneRecaptchaWorkaroundStore.readTemplate(context, app.packageName)
+        val savedProxy = cloneToEdit?.virtualUserId?.let { userId ->
+            runCatching { CloneProxyStore.read(context, app.packageName, userId) }.getOrNull()
+        }
+        val savedNetworkIdentity = cloneToEdit?.virtualUserId?.let { userId ->
+            runCatching { CloneNetworkIdentityStore.read(context, app.packageName, userId) }.getOrNull()
+        }
+        feedRegionSettings = CloneFeedRegionSettings(
+            socks5Proxy = savedProxy?.takeIf { it.type == 1 }?.input().orEmpty(),
+            detectedCountryIso = savedNetworkIdentity?.proxyCountryIso.orEmpty(),
+            savedProxyType = savedProxy?.type ?: 0
+        )
     }
 
     Scaffold(
@@ -1498,7 +1930,8 @@ private fun ClonyHomeRedesigned(
                                 buildProps,
                                 identitySettingsForNewCopies,
                                 hardwareSettingsForNewCopies,
-                                recaptchaWorkaroundForNewCopies
+                                recaptchaWorkaroundForNewCopies,
+                                feedRegionSettings
                             )
                         }
                     },
@@ -1632,6 +2065,21 @@ private fun ClonyHomeRedesigned(
                             )
                         }
                         item {
+                            RegionalFeedCard(
+                                settings = feedRegionSettings,
+                                enabled = busyPackageName == null,
+                                isEditingClone = editingClone != null,
+                                onSettingsChange = {
+                                    feedRegionSettings = it
+                                    onMessageDismissed()
+                                },
+                                onTestProxy = { onTestCloneFeedProxy(detailApp, feedRegionSettings) },
+                                onSaveForExistingClone = {
+                                    editingClone?.let { onSaveCloneFeedProxy(it, feedRegionSettings) }
+                                }
+                            )
+                        }
+                        item {
                             DetailActionCard(
                                 title = "Identity, privacy & spoofing",
                                 description = "Device, network and radio identity options",
@@ -1668,7 +2116,6 @@ private fun ClonyHomeRedesigned(
                     )
                     CloneFeatureScreen.CONNECTION_OPERATOR_INFO -> ConnectionOperatorInfoScreen(
                         appLabel = detailApp.label,
-                        packageName = detailApp.packageName,
                         editingCloneName = editingClone?.displayName,
                         settings = networkIdentitySettings,
                         onSettingsChange = { updatedSettings ->
@@ -1678,40 +2125,6 @@ private fun ClonyHomeRedesigned(
                                 editingClone?.virtualUserId,
                                 updatedSettings
                             )
-                        },
-                        onLoadUaeSample = {
-                            screenScope.launch {
-                                try {
-                                    val sample = withContext(Dispatchers.IO) {
-                                        SimProfileDirectory.fetchUaeSample()
-                                    }
-                                    val updatedSettings = networkIdentitySettings.copy(
-                                        simulateSimProfile = true,
-                                        simPhoneNumber = sample.phoneNumber,
-                                        simCarrierName = sample.carrierName,
-                                        simCountryIso = sample.countryIso,
-                                        simOperatorCode = sample.operatorCode
-                                    )
-                                    networkIdentitySettings = updatedSettings
-                                    onSaveNetworkIdentitySettings(
-                                        detailApp,
-                                        editingClone?.virtualUserId,
-                                        updatedSettings
-                                    )
-                                    Toast.makeText(
-                                        context,
-                                        "Loaded UAE sample carrier data. Review the phone placeholder before testing.",
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                } catch (error: Throwable) {
-                                    Toast.makeText(
-                                        context,
-                                        error.message?.takeIf(String::isNotBlank)
-                                            ?: "Couldn't load the online carrier data.",
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                }
-                            }
                         }
                     )
                     CloneFeatureScreen.DEVICE_PROFILE_HARDWARE -> DeviceProfileHardwareScreen(
@@ -1769,14 +2182,16 @@ private fun ClonyHomeRedesigned(
                                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                     row.forEach { app ->
                                         AppGridTile(
-                                            app, busyPackageName == app.packageName, busyPackageName == null,
-                                            Modifier.weight(1f),
+                                            app = app,
+                                            publicIpv4 = ipv4ByClone[cloneIpv4Key(app)] ?: "Checking…",
+                                            isBusy = busyPackageName == app.packageName,
+                                            isEnabled = busyPackageName == null,
+                                            modifier = Modifier.weight(1f),
                                             onClick = { onOpenClone(app) },
                                             onEditClone = {
                                                 systemApps.firstOrNull { it.packageName == app.packageName }
                                                     ?.let { openSystemApp(it, app) }
                                             },
-                                            onProxy = { networkApp = app },
                                             onPin = { onPinClone(app) },
                                             onDelete = { deleteApp = app }
                                         )
@@ -1837,7 +2252,7 @@ private fun ClonyHomeRedesigned(
                             enabled = !alreadyInstalled && busyPackageName == null,
                             onClick = {
                                 containerChoiceApp = null
-                                onInstallIntoContainer(app, userId)
+                                onInstallIntoContainer(app, userId, feedRegionSettings)
                             }
                         ) {
                             Column(Modifier.fillMaxWidth()) {
@@ -1879,13 +2294,6 @@ private fun ClonyHomeRedesigned(
             },
             confirmButton = { TextButton(onClick = { onDeleteClone(app); deleteApp = null }) { Text("Delete Clone", color = MaterialTheme.colorScheme.error) } },
             dismissButton = { TextButton(onClick = { deleteApp = null }) { Text("Cancel") } }
-        )
-    }
-    networkApp?.let { app ->
-        CloneProxyDialog(
-            app,
-            onDismiss = { networkApp = null },
-            onSaved = { networkApp = null; onRefresh() }
         )
     }
 }
@@ -2026,6 +2434,98 @@ private fun RecaptchaWorkaroundCard(enabled: Boolean, onEnabledChange: (Boolean)
 }
 
 @Composable
+private fun RegionalFeedCard(
+    settings: CloneFeedRegionSettings,
+    enabled: Boolean,
+    isEditingClone: Boolean,
+    onSettingsChange: (CloneFeedRegionSettings) -> Unit,
+    onTestProxy: () -> Unit,
+    onSaveForExistingClone: () -> Unit
+) {
+    val detectedCountry = settings.detectedCountryIso.takeIf(String::isNotBlank)
+        ?.uppercase(Locale.ROOT)
+        ?.let { Locale.Builder().setRegion(it).build().getDisplayCountry(Locale.getDefault()) }
+        ?.takeIf(String::isNotBlank)
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text("Proxy & feed region", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Tap Test proxy to check TCP and UDP and detect the country and approximate GPS before cloning.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            OutlinedTextField(
+                value = settings.socks5Proxy,
+                onValueChange = {
+                    onSettingsChange(settings.copy(socks5Proxy = it, detectedCountryIso = "", savedProxyType = 1))
+                },
+                enabled = enabled,
+                label = { Text("SOCKS5 host:port[:user:pass]") },
+                supportingText = { Text("Leave blank to use the phone's normal connection.") },
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            if (!isEditingClone) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+                    TextButton(
+                        onClick = onTestProxy,
+                        enabled = enabled && settings.isConfigured
+                    ) {
+                        Text("Test proxy")
+                    }
+                }
+            }
+            if (detectedCountry != null) {
+                Text(
+                    "Detected proxy country: $detectedCountry",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            if (settings.savedProxyType == 2) {
+                Text(
+                    "This copy has an HTTP proxy saved. Enter a SOCKS5 proxy to enable matching feed-region routing.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else if (!isEditingClone && settings.isConfigured) {
+                Text(
+                    "TikTok may still personalize recommendations from account and viewing history.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (isEditingClone) {
+                OutlinedButton(
+                    onClick = onSaveForExistingClone,
+                    enabled = enabled,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        when {
+                            settings.isConfigured -> "Test & apply proxy"
+                            settings.savedProxyType != 0 || settings.detectedCountryIso.isNotBlank() -> "Remove proxy"
+                            else -> "Use direct connection"
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SystemAppRow(app: AppTile, isBusy: Boolean, onClick: () -> Unit) {
     Card(
         onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp),
@@ -2110,12 +2610,12 @@ private fun CloneCountSheet(
 @Composable
 private fun AppGridTile(
     app: AppTile,
+    publicIpv4: String,
     isBusy: Boolean,
     isEnabled: Boolean,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onEditClone: () -> Unit,
-    onProxy: () -> Unit,
     onPin: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -2148,13 +2648,6 @@ private fun AppGridTile(
                     onClick = {
                         actionsExpanded = false
                         onEditClone()
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Proxy / network") },
-                    onClick = {
-                        actionsExpanded = false
-                        onProxy()
                     }
                 )
                 DropdownMenuItem(
@@ -2209,6 +2702,13 @@ private fun AppGridTile(
                         Toast.makeText(context, "Package name copied", Toast.LENGTH_SHORT).show()
                     }
                 )
+            )
+            Text(
+                "IPv4: $publicIpv4",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
         }

@@ -17,6 +17,7 @@ import black.android.app.BRActivity;
 import black.android.app.BRActivityThread;
 import top.niunaijun.blackbox.BlackBoxCore;
 import top.niunaijun.blackbox.app.BActivityThread;
+import top.niunaijun.blackbox.app.CloneStaticTextOverlay;
 import top.niunaijun.blackbox.fake.hook.HookManager;
 import top.niunaijun.blackbox.fake.hook.IInjectHook;
 import top.niunaijun.blackbox.fake.service.HCallbackProxy;
@@ -141,12 +142,14 @@ public final class AppInstrumentation extends BaseInstrumentationDelegate implem
     public void callActivityOnCreate(Activity activity, Bundle icicle, PersistableBundle persistentState) {
         checkActivity(activity);
         super.callActivityOnCreate(activity, icicle, persistentState);
+        CloneStaticTextOverlay.attach(activity);
     }
 
     @Override
     public void callActivityOnCreate(Activity activity, Bundle icicle) {
         checkActivity(activity);
         super.callActivityOnCreate(activity, icicle);
+        CloneStaticTextOverlay.attach(activity);
     }
 
     @Override

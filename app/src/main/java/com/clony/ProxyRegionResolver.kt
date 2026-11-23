@@ -1,6 +1,8 @@
 package com.clony
 
+import android.os.SystemClock
 import android.util.Base64
+import android.util.Log
 import org.json.JSONObject
 import top.niunaijun.blackbox.core.network.CloneProxyConfig
 import java.io.ByteArrayOutputStream
@@ -8,65 +10,140 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.nio.charset.StandardCharsets
 import java.util.Locale
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
-/** Resolves the public egress country by making the lookup through the saved proxy. */
+internal data class ProxyGeoRegion(
+    val countryIso: String,
+    val latitude: Double,
+    val longitude: Double
+)
+
+/** Resolves the proxy's public egress country and approximate coordinates through that proxy. */
 internal object ProxyRegionResolver {
+    private const val TAG = "ClonyProxyRegion"
     private const val GEO_HOST = "ipwho.is"
     private const val GEO_PORT = 443
+    private const val IPV4_HOST = "api4.ipify.org"
+    private const val IPV4_PORT = 443
     private const val CONNECT_TIMEOUT_MS = 5_000
     private const val READ_TIMEOUT_MS = 5_000
     private const val MAX_HEADER_BYTES = 8 * 1024
     private const val MAX_RESPONSE_BYTES = 32 * 1024
 
     @Throws(IOException::class)
-    fun detectCountryIso(config: CloneProxyConfig): String {
+    fun detectRegion(config: CloneProxyConfig, traceId: String): ProxyGeoRegion {
         if (config.type != 1 && config.type != 2) {
             throw IOException("Choose a SOCKS5 or HTTP proxy before detecting its region.")
         }
 
+        val started = SystemClock.elapsedRealtime()
+        Log.i(TAG, "event=region_detect_begin trace_id=$traceId proxy_type=${config.type}")
         val proxySocket = Socket()
         try {
             val endpoint = config.resolvedHost.ifEmpty { config.host }
-            proxySocket.connect(InetSocketAddress(endpoint, config.port), CONNECT_TIMEOUT_MS)
-            proxySocket.soTimeout = READ_TIMEOUT_MS
-            when (config.type) {
-                1 -> connectSocks5(proxySocket, config)
-                2 -> connectHttp(proxySocket, config)
+            traceStage(traceId, "proxy_endpoint_connect") {
+                proxySocket.connect(InetSocketAddress(endpoint, config.port), CONNECT_TIMEOUT_MS)
+                proxySocket.soTimeout = READ_TIMEOUT_MS
             }
-            return requestCountry(proxySocket)
+            when (config.type) {
+                1 -> connectSocks5(proxySocket, config, traceId, GEO_HOST, GEO_PORT)
+                2 -> connectHttp(proxySocket, config, traceId, GEO_HOST, GEO_PORT)
+            }
+            val region = requestRegion(proxySocket, traceId)
+            Log.i(TAG, "event=region_detect_complete trace_id=$traceId result=success country=${region.countryIso.uppercase(Locale.ROOT)} elapsed_ms=${SystemClock.elapsedRealtime() - started}")
+            return region
         } catch (error: IOException) {
-            throw IOException("Could not detect the proxy's exit country. Check the proxy connection and try again.", error)
+            Log.w(TAG, "event=region_detect_complete trace_id=$traceId result=failure error_type=${error.javaClass.simpleName} elapsed_ms=${SystemClock.elapsedRealtime() - started}")
+            val detail = error.message?.takeIf(String::isNotBlank)
+            throw IOException(
+                detail?.let { "Could not detect the proxy's exit country or GPS location: $it" }
+                    ?: "Could not detect the proxy's exit country or GPS location. Check the proxy connection and try again.",
+                error
+            )
         } finally {
             runCatching { proxySocket.close() }
         }
     }
 
-    private fun connectSocks5(socket: Socket, config: CloneProxyConfig) {
+    /** Looks up the public IPv4 address seen through this clone's configured proxy. */
+    @Throws(IOException::class)
+    fun detectPublicIpv4(config: CloneProxyConfig, traceId: String): String {
+        if (config.type != 1 && config.type != 2) {
+            throw IOException("Choose a SOCKS5 or HTTP proxy before looking up its public IPv4 address.")
+        }
+
+        val started = SystemClock.elapsedRealtime()
+        Log.i(TAG, "event=ipv4_detect_begin trace_id=$traceId proxy_type=${config.type}")
+        val proxySocket = Socket()
+        try {
+            val endpoint = config.resolvedHost.ifEmpty { config.host }
+            traceStage(traceId, "ipv4_proxy_endpoint_connect") {
+                proxySocket.connect(InetSocketAddress(endpoint, config.port), CONNECT_TIMEOUT_MS)
+                proxySocket.soTimeout = READ_TIMEOUT_MS
+            }
+            when (config.type) {
+                1 -> connectSocks5(proxySocket, config, traceId, IPV4_HOST, IPV4_PORT)
+                2 -> connectHttp(proxySocket, config, traceId, IPV4_HOST, IPV4_PORT)
+            }
+            val address = requestPublicIpv4(proxySocket, traceId)
+            Log.i(TAG, "event=ipv4_detect_complete trace_id=$traceId result=success elapsed_ms=${SystemClock.elapsedRealtime() - started}")
+            return address
+        } catch (error: IOException) {
+            Log.w(TAG, "event=ipv4_detect_complete trace_id=$traceId result=failure error_type=${error.javaClass.simpleName} elapsed_ms=${SystemClock.elapsedRealtime() - started}")
+            val detail = error.message?.takeIf(String::isNotBlank)
+            throw IOException(
+                detail?.let { "Could not detect the proxy's public IPv4 address: $it" }
+                    ?: "Could not detect the proxy's public IPv4 address. Check the proxy connection and try again.",
+                error
+            )
+        } finally {
+            runCatching { proxySocket.close() }
+        }
+    }
+
+    private fun connectSocks5(
+        socket: Socket,
+        config: CloneProxyConfig,
+        traceId: String,
+        destinationHost: String,
+        destinationPort: Int
+    ) {
         val input = socket.getInputStream()
         val output = socket.getOutputStream()
         val username = config.username.toByteArray(StandardCharsets.UTF_8)
         val password = config.password.toByteArray(StandardCharsets.UTF_8)
         val requiresAuth = username.isNotEmpty()
 
-        output.write(if (requiresAuth) byteArrayOf(5, 1, 2) else byteArrayOf(5, 1, 0))
-        output.flush()
-        val greeting = readExact(input, 2)
+        val greeting = traceStage(traceId, "socks5_greeting") {
+            output.write(if (requiresAuth) byteArrayOf(5, 1, 2) else byteArrayOf(5, 1, 0))
+            output.flush()
+            try {
+                readExact(input, 2)
+            } catch (error: SocketTimeoutException) {
+                throw IOException(
+                    "SOCKS5 handshake timed out waiting for the proxy's greeting. Check its host, port, and availability.",
+                    error
+                )
+            }
+        }
         val expectedMethod = if (requiresAuth) 2 else 0
         if ((greeting[0].toInt() and 0xff) != 5 || (greeting[1].toInt() and 0xff) != expectedMethod) {
             throw IOException("SOCKS5 authentication method was rejected.")
         }
 
         if (requiresAuth) {
-            output.write(byteArrayOf(1, username.size.toByte()))
-            output.write(username)
-            output.write(password.size.toByte().toInt())
-            output.write(password)
-            output.flush()
-            val authReply = readExact(input, 2)
+            val authReply = traceStage(traceId, "socks5_authentication") {
+                output.write(byteArrayOf(1, username.size.toByte()))
+                output.write(username)
+                output.write(password.size.toByte().toInt())
+                output.write(password)
+                output.flush()
+                readExact(input, 2)
+            }
             if ((authReply[0].toInt() and 0xff) != 1 || authReply[1].toInt() != 0) {
                 throw IOException("SOCKS5 credentials were rejected.")
             }
@@ -74,28 +151,36 @@ internal object ProxyRegionResolver {
 
         // Send the hostname as SOCKS5 ATYP=DOMAIN so DNS resolution happens at
         // the proxy side instead of through the phone's resolver.
-        val destination = GEO_HOST.toByteArray(StandardCharsets.US_ASCII)
-        output.write(byteArrayOf(5, 1, 0, 3, destination.size.toByte()))
-        output.write(destination)
-        output.write(byteArrayOf((GEO_PORT ushr 8).toByte(), GEO_PORT.toByte()))
-        output.flush()
+        val destination = destinationHost.toByteArray(StandardCharsets.US_ASCII)
+        traceStage(traceId, "socks5_destination_tunnel") {
+            output.write(byteArrayOf(5, 1, 0, 3, destination.size.toByte()))
+            output.write(destination)
+            output.write(byteArrayOf((destinationPort ushr 8).toByte(), destinationPort.toByte()))
+            output.flush()
 
-        val reply = readExact(input, 4)
-        if ((reply[0].toInt() and 0xff) != 5 || reply[1].toInt() != 0) {
-            throw IOException("SOCKS5 could not connect to the region lookup service.")
+            val reply = readExact(input, 4)
+            if ((reply[0].toInt() and 0xff) != 5 || reply[1].toInt() != 0) {
+                throw IOException("SOCKS5 could not connect to the lookup service.")
+            }
+            val addressLength = when (reply[3].toInt() and 0xff) {
+                1 -> 4
+                4 -> 16
+                3 -> readExact(input, 1)[0].toInt() and 0xff
+                else -> throw IOException("SOCKS5 returned an invalid address.")
+            }
+            readExact(input, addressLength + 2)
         }
-        val addressLength = when (reply[3].toInt() and 0xff) {
-            1 -> 4
-            4 -> 16
-            3 -> readExact(input, 1)[0].toInt() and 0xff
-            else -> throw IOException("SOCKS5 returned an invalid address.")
-        }
-        readExact(input, addressLength + 2)
     }
 
-    private fun connectHttp(socket: Socket, config: CloneProxyConfig) {
+    private fun connectHttp(
+        socket: Socket,
+        config: CloneProxyConfig,
+        traceId: String,
+        destinationHost: String,
+        destinationPort: Int
+    ) {
         val output = socket.getOutputStream()
-        val authority = "$GEO_HOST:$GEO_PORT"
+        val authority = "$destinationHost:$destinationPort"
         val request = StringBuilder()
             .append("CONNECT ").append(authority).append(" HTTP/1.1\r\n")
             .append("Host: ").append(authority).append("\r\n")
@@ -106,45 +191,85 @@ internal object ProxyRegionResolver {
                 .append(Base64.encodeToString(credentials, Base64.NO_WRAP)).append("\r\n")
         }
         request.append("\r\n")
-        output.write(request.toString().toByteArray(StandardCharsets.US_ASCII))
-        output.flush()
+        traceStage(traceId, "http_connect_tunnel") {
+            output.write(request.toString().toByteArray(StandardCharsets.US_ASCII))
+            output.flush()
 
-        val input = socket.getInputStream()
-        val statusLine = readAsciiLine(input, MAX_HEADER_BYTES)
-            ?: throw IOException("HTTP proxy closed the connection.")
-        val status = statusLine.split(' ').getOrNull(1)?.toIntOrNull()
-            ?: throw IOException("HTTP proxy returned an invalid response.")
-        var headerBytes = statusLine.length + 2
-        while (true) {
-            val line = readAsciiLine(input, MAX_HEADER_BYTES - headerBytes)
-                ?: throw IOException("HTTP proxy returned incomplete headers.")
-            headerBytes += line.length + 2
-            if (headerBytes > MAX_HEADER_BYTES) throw IOException("HTTP proxy headers are too large.")
-            if (line.isEmpty()) break
+            val input = socket.getInputStream()
+            val statusLine = readAsciiLine(input, MAX_HEADER_BYTES)
+                ?: throw IOException("HTTP proxy closed the connection.")
+            val status = statusLine.split(' ').getOrNull(1)?.toIntOrNull()
+                ?: throw IOException("HTTP proxy returned an invalid response.")
+            var headerBytes = statusLine.length + 2
+            while (true) {
+                val line = readAsciiLine(input, MAX_HEADER_BYTES - headerBytes)
+                    ?: throw IOException("HTTP proxy returned incomplete headers.")
+                headerBytes += line.length + 2
+                if (headerBytes > MAX_HEADER_BYTES) throw IOException("HTTP proxy headers are too large.")
+                if (line.isEmpty()) break
+            }
+            if (status !in 200..299) throw IOException("HTTP proxy refused the HTTPS tunnel.")
         }
-        if (status !in 200..299) throw IOException("HTTP proxy refused the HTTPS tunnel.")
     }
 
-    private fun requestCountry(tunnel: Socket): String {
+    private fun requestPublicIpv4(tunnel: Socket, traceId: String): String {
+        val tls = (SSLSocketFactory.getDefault() as SSLSocketFactory)
+            .createSocket(tunnel, IPV4_HOST, IPV4_PORT, true) as SSLSocket
+        tls.soTimeout = READ_TIMEOUT_MS
+        val parameters = tls.sslParameters
+        parameters.endpointIdentificationAlgorithm = "HTTPS"
+        tls.sslParameters = parameters
+        traceStage(traceId, "ipv4_tls_handshake") { tls.startHandshake() }
+
+        tls.use { secureSocket ->
+            val request = "GET / HTTP/1.1\r\n" +
+                "Host: $IPV4_HOST\r\n" +
+                "User-Agent: Clony/1.0\r\n" +
+                "Accept: text/plain\r\n" +
+                "Accept-Encoding: identity\r\n" +
+                "Connection: close\r\n\r\n"
+            val response = traceStage(traceId, "ipv4_http_request_response") {
+                secureSocket.outputStream.write(request.toByteArray(StandardCharsets.US_ASCII))
+                secureSocket.outputStream.flush()
+                readHttpResponse(secureSocket.inputStream)
+            }
+            if (response.status !in 200..299) throw IOException("IPv4 lookup returned HTTP ${response.status}.")
+            val address = String(response.body, StandardCharsets.UTF_8).trim()
+            if (!isIpv4Address(address)) throw IOException("IPv4 lookup returned an invalid address.")
+            return address
+        }
+    }
+
+    private fun isIpv4Address(value: String): Boolean {
+        val parts = value.split('.')
+        return parts.size == 4 && parts.all { part ->
+            part.isNotEmpty() && part.all { it in '0'..'9' } &&
+                (part.toIntOrNull() ?: -1) in 0..255
+        }
+    }
+
+    private fun requestRegion(tunnel: Socket, traceId: String): ProxyGeoRegion {
         val tls = (SSLSocketFactory.getDefault() as SSLSocketFactory)
             .createSocket(tunnel, GEO_HOST, GEO_PORT, true) as SSLSocket
         tls.soTimeout = READ_TIMEOUT_MS
         val parameters = tls.sslParameters
         parameters.endpointIdentificationAlgorithm = "HTTPS"
         tls.sslParameters = parameters
-        tls.startHandshake()
+        traceStage(traceId, "tls_handshake") { tls.startHandshake() }
 
         tls.use { secureSocket ->
-            val request = "GET /?fields=success,country_code HTTP/1.1\r\n" +
+            val request = "GET /?fields=success,country_code,latitude,longitude HTTP/1.1\r\n" +
                 "Host: $GEO_HOST\r\n" +
                 "User-Agent: Clony/1.0\r\n" +
                 "Accept: application/json\r\n" +
                 "Accept-Encoding: identity\r\n" +
                 "Connection: close\r\n\r\n"
-            secureSocket.outputStream.write(request.toByteArray(StandardCharsets.US_ASCII))
-            secureSocket.outputStream.flush()
-
-            val response = readHttpResponse(secureSocket.inputStream)
+            val response = traceStage(traceId, "region_http_request_response") {
+                secureSocket.outputStream.write(request.toByteArray(StandardCharsets.US_ASCII))
+                secureSocket.outputStream.flush()
+                readHttpResponse(secureSocket.inputStream)
+            }
+            Log.i(TAG, "event=region_http_response trace_id=$traceId status=${response.status} body_bytes=${response.body.size}")
             if (response.status !in 200..299) throw IOException("Region lookup returned HTTP ${response.status}.")
             val payload = try {
                 JSONObject(String(response.body, StandardCharsets.UTF_8))
@@ -154,7 +279,26 @@ internal object ProxyRegionResolver {
             if (!payload.optBoolean("success", false)) throw IOException("Region lookup did not return a country.")
             val countryIso = payload.optString("country_code", "").trim().uppercase(Locale.ROOT)
             if (!countryIso.matches(Regex("[A-Z]{2}"))) throw IOException("Region lookup returned an invalid country code.")
-            return countryIso.lowercase(Locale.ROOT)
+            val latitude = payload.optDouble("latitude", Double.NaN)
+            val longitude = payload.optDouble("longitude", Double.NaN)
+            if (!latitude.isFinite() || latitude !in -90.0..90.0 ||
+                !longitude.isFinite() || longitude !in -180.0..180.0
+            ) {
+                throw IOException("Region lookup did not return valid proxy location coordinates.")
+            }
+            return ProxyGeoRegion(countryIso.lowercase(Locale.ROOT), latitude, longitude)
+        }
+    }
+
+    private inline fun <T> traceStage(traceId: String, stage: String, block: () -> T): T {
+        val started = SystemClock.elapsedRealtime()
+        return try {
+            val value = block()
+            Log.i(TAG, "event=region_stage trace_id=$traceId stage=$stage result=success elapsed_ms=${SystemClock.elapsedRealtime() - started}")
+            value
+        } catch (error: Throwable) {
+            Log.w(TAG, "event=region_stage trace_id=$traceId stage=$stage result=failure error_type=${error.javaClass.simpleName} elapsed_ms=${SystemClock.elapsedRealtime() - started}")
+            throw error
         }
     }
 
