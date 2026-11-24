@@ -14,6 +14,17 @@ internal object ClonePublicIpv4Lookup {
     private const val IPV4_ENDPOINT = "https://api4.ipify.org"
     private const val NETWORK_TIMEOUT_MS = 8_000
 
+    /** Looks up the phone's public IPv4 through its default, unproxied network route. */
+    suspend fun fetchPhonePublicIpv4(): String? = withContext(Dispatchers.IO) {
+        try {
+            fetchWithoutProxy()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     suspend fun fetch(context: Context, app: AppTile): String? {
         val userId = app.virtualUserId ?: return null
         return withContext(Dispatchers.IO) {

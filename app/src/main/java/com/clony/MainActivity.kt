@@ -1739,6 +1739,7 @@ private fun ClonyHomeRedesigned(
         onDispose { lifecycle?.removeObserver(observer) }
     }
     var ipv4ByClone by remember { mutableStateOf(emptyMap<String, String>()) }
+    var phonePublicIpv4 by remember { mutableStateOf("Checking…") }
     val ipv4LookupSemaphore = remember { Semaphore(4) }
     val systemApps = remember(apps) {
         apps.groupBy { it.packageName }.values.map { copies ->
@@ -1750,6 +1751,10 @@ private fun ClonyHomeRedesigned(
     }
     val clones = remember(apps) {
         apps.filter { it.isCloned }.sortedWith(compareBy<AppTile> { it.label.lowercase() }.thenBy { it.copyNumber })
+    }
+    LaunchedEffect(selectedTab, detailPackage, activityResumed) {
+        if (selectedTab != 0 || detailPackage != null || !activityResumed) return@LaunchedEffect
+        phonePublicIpv4 = ClonePublicIpv4Lookup.fetchPhonePublicIpv4() ?: "Unavailable"
     }
     LaunchedEffect(selectedTab, detailPackage, clones, activityResumed) {
         if (selectedTab != 0 || detailPackage != null || !activityResumed || clones.isEmpty()) {
@@ -2159,6 +2164,29 @@ private fun ClonyHomeRedesigned(
                                 }
                                 Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceVariant) {
                                     Text("${clones.size}", Modifier.padding(horizontal = 14.dp, vertical = 8.dp), style = MaterialTheme.typography.labelLarge)
+                                }
+                            }
+                        }
+                        item {
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(20.dp),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
+                            ) {
+                                Column(
+                                    Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        "Public IPv4",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        phonePublicIpv4,
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
                                 }
                             }
                         }
