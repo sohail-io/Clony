@@ -119,6 +119,7 @@ import top.niunaijun.blackbox.fake.service.VirtualDeviceIdentity
 import top.niunaijun.blackbox.fake.frameworks.BAccountManager
 import top.niunaijun.blackbox.fake.frameworks.BLocationManager
 import top.niunaijun.blackbox.entity.location.BLocation
+import java.io.IOException
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.security.MessageDigest
@@ -146,9 +147,22 @@ private enum class CloneFeatureScreen {
 
 private data class PreparedFeedProxy(
     val config: CloneProxyConfig,
-    val region: ProxyGeoRegion,
-    val traceId: String
+    val region: ProxyGeoRegion?,
+    val traceId: String,
+    val udpRelayWarning: String?,
+    val regionWarning: String?
 )
+
+private fun PreparedFeedProxy.userWarning(): String? = buildList {
+    if (region == null) {
+        add(
+            "The proxy is still usable, but Clony couldn't detect its country/GPS, so automatic " +
+                "region matching and GPS aren't available." +
+                (regionWarning?.let { " Details: $it" } ?: "")
+        )
+    }
+    udpRelayWarning?.let { add(it) }
+}.takeIf { it.isNotEmpty() }?.joinToString(" ")
 
 private data class CachedFeedProxy(
     val settingsFingerprint: String,
@@ -1024,11 +1038,11 @@ class MainActivity : ComponentActivity() {
             if (ageMs >= 0 && ageMs < FEED_PROXY_PREFLIGHT_CACHE_TTL_MS) {
                 Log.i(
                     TRACE_TAG,
-                    "feed_proxy_preflight cache=hit trace_id=${cached.prepared.traceId} operation=$operation age_ms=$ageMs country=${cached.prepared.region.countryIso.uppercase(Locale.ROOT)}"
+                    "feed_proxy_preflight cache=hit trace_id=${cached.prepared.traceId} operation=$operation age_ms=$ageMs country=${cached.prepared.region?.countryIso?.uppercase(Locale.ROOT) ?: "unknown"}"
                 )
                 Log.i(
                     TRACE_TAG,
-                    "feed_proxy_preflight event=complete trace_id=${cached.prepared.traceId} result=success cache=hit country=${cached.prepared.region.countryIso.uppercase(Locale.ROOT)} elapsed_ms=${SystemClock.elapsedRealtime() - started}"
+                    "feed_proxy_preflight event=complete trace_id=${cached.prepared.traceId} result=success cache=hit country=${cached.prepared.region?.countryIso?.uppercase(Locale.ROOT) ?: "unknown"} elapsed_ms=${SystemClock.elapsedRealtime() - started}"
                 )
                 return cached.prepared
             }
@@ -1055,20 +1069,36 @@ class MainActivity : ComponentActivity() {
                 preparedConfig.password.toByteArray(Charsets.UTF_8)
             )
             val probeElapsedMs = SystemClock.elapsedRealtime() - probeStarted
+            val udpRelayWarning = proxyProbeUdpWarning(preparedConfig.type, probeResult)
             if (probeResult == 0) {
-                Log.i(TRACE_TAG, "feed_proxy_preflight stage=native_tcp_udp_probe result=success trace_id=$traceId elapsed_ms=$probeElapsedMs")
+                Log.i(TRACE_TAG, "feed_proxy_preflight stage=native_tcp_udp_probe result=success udp_relay=available trace_id=$traceId elapsed_ms=$probeElapsedMs")
+            } else if (udpRelayWarning != null) {
+                Log.w(TRACE_TAG, "feed_proxy_preflight stage=native_tcp_udp_probe result=tcp_only udp_relay=unavailable trace_id=$traceId result_code=$probeResult elapsed_ms=$probeElapsedMs")
             } else {
                 Log.w(TRACE_TAG, "feed_proxy_preflight stage=native_tcp_udp_probe result=failure trace_id=$traceId result_code=$probeResult elapsed_ms=$probeElapsedMs")
             }
-            if (probeResult != 0) error(proxyProbeFailureMessage(preparedConfig.type, probeResult))
-            val detectedRegion = feedProxyStage(traceId, "proxy_region_lookup") {
-                ProxyRegionResolver.detectRegion(preparedConfig, traceId)
+            if (probeResult != 0 && udpRelayWarning == null) {
+                error(proxyProbeFailureMessage(preparedConfig.type, probeResult))
+            }
+            var regionWarning: String? = null
+            val detectedRegion = try {
+                feedProxyStage(traceId, "proxy_region_lookup") {
+                    ProxyRegionResolver.detectRegion(preparedConfig, traceId)
+                }
+            } catch (error: IOException) {
+                regionWarning = error.message?.takeIf(String::isNotBlank)
+                    ?: "Could not detect the proxy's exit country or GPS location."
+                Log.w(
+                    TRACE_TAG,
+                    "feed_proxy_preflight stage=proxy_region_lookup result=unavailable trace_id=$traceId error_type=${error.javaClass.simpleName}"
+                )
+                null
             }
             Log.i(
                 TRACE_TAG,
-                "feed_proxy_preflight event=complete trace_id=$traceId result=success country=${detectedRegion.countryIso.uppercase(Locale.ROOT)} elapsed_ms=${SystemClock.elapsedRealtime() - started}"
+                "feed_proxy_preflight event=complete trace_id=$traceId result=success country=${detectedRegion?.countryIso?.uppercase(Locale.ROOT) ?: "unknown"} elapsed_ms=${SystemClock.elapsedRealtime() - started}"
             )
-            val prepared = PreparedFeedProxy(preparedConfig, detectedRegion, traceId)
+            val prepared = PreparedFeedProxy(preparedConfig, detectedRegion, traceId, udpRelayWarning, regionWarning)
             lastSuccessfulFeedProxy = CachedFeedProxy(
                 settingsFingerprint = settingsFingerprint,
                 validatedAtElapsedMs = SystemClock.elapsedRealtime(),
@@ -1109,11 +1139,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun automaticLocationForProxy(proxy: PreparedFeedProxy?) = proxy?.let {
-        CloneSpoofLocationSettings(
-            enabled = true,
-            latitude = it.region.latitude,
-            longitude = it.region.longitude
-        )
+        it.region?.let { region ->
+            CloneSpoofLocationSettings(
+                enabled = true,
+                latitude = region.latitude,
+                longitude = region.longitude
+            )
+        } ?: CloneSpoofLocationSettings()
     } ?: CloneSpoofLocationSettings()
 
     private fun testCloneFeedProxy(tile: AppTile, settings: CloneFeedRegionSettings) {
@@ -1122,16 +1154,19 @@ class MainActivity : ComponentActivity() {
             showError("Enter a SOCKS5 proxy before testing it.", null)
             return
         }
-        showProgress(tile.packageName, "Testing proxy and detecting its country and location…")
+        showProgress(tile.packageName, "Checking proxy and trying to detect its country and location…")
         lifecycleScope.launch {
             try {
                 val prepared = feedProxySettingsMutex.withLock {
                     withContext(Dispatchers.IO) { resolveFeedProxy(settings, "test") }
                 } ?: error("Enter a SOCKS5 proxy before testing it.")
-                val region = prepared.region
+                val regionStatus = prepared.region?.let { region ->
+                    "Country: ${region.countryIso.uppercase(Locale.ROOT)}; " +
+                        "approximate GPS: ${String.format(Locale.ROOT, "%.4f, %.4f", region.latitude, region.longitude)}."
+                } ?: "Country/GPS lookup unavailable."
+                val warning = prepared.userWarning()?.let { " $it" }.orEmpty()
                 showInfo(
-                    "Proxy test passed. Country: ${region.countryIso.uppercase(Locale.ROOT)}; " +
-                        "approximate GPS: ${String.format(Locale.ROOT, "%.4f, %.4f", region.latitude, region.longitude)}. " +
+                    "Proxy TCP check passed. $regionStatus$warning " +
                         "You can clone now."
                 )
             } catch (error: Throwable) {
@@ -1144,10 +1179,10 @@ class MainActivity : ComponentActivity() {
     private fun saveCloneFeedProxy(tile: AppTile, settings: CloneFeedRegionSettings) {
         val userId = tile.virtualUserId ?: return
         if (busyPackageState.value != null) return
-        showProgress(tile.packageName, "Testing proxy and detecting its location…")
+        showProgress(tile.packageName, "Checking proxy and trying to detect its location…")
         lifecycleScope.launch {
             try {
-                val detectedRegion = feedProxySettingsMutex.withLock {
+                val savedProxy = feedProxySettingsMutex.withLock {
                     withContext(Dispatchers.IO) {
                         val prepared = resolveFeedProxy(settings, "apply")
                         val previousProxy = CloneProxyStore.read(this@MainActivity, tile.packageName, userId)
@@ -1202,15 +1237,22 @@ class MainActivity : ComponentActivity() {
                         BlackBoxCore.get().stopPackage(tile.packageName, userId)
                         Log.i(TRACE_TAG, "feed_proxy_save stage=restart_requested trace_id=${prepared?.traceId ?: "none"} package=${tile.packageName} userId=$userId")
                         Log.i(TRACE_TAG, "feed_proxy_save event=complete trace_id=${prepared?.traceId ?: "none"} result=success package=${tile.packageName} userId=$userId")
-                        prepared?.region
+                        prepared
                     }
                 }
-                showInfo(
-                    detectedRegion?.let {
-                        "Proxy saved. Feed region detected as ${it.countryIso.uppercase(Locale.ROOT)}. " +
-                            "GPS now follows the proxy's approximate location."
-                    } ?: "Proxy removed. This copy will use the phone's normal connection and location."
-                )
+                val message = when {
+                    savedProxy == null ->
+                        "Proxy removed. This copy will use the phone's normal connection and location."
+                    savedProxy.region != null ->
+                        "Proxy saved. Feed region detected as ${savedProxy.region.countryIso.uppercase(Locale.ROOT)}. " +
+                            "GPS now follows the proxy's approximate location." +
+                            (savedProxy.userWarning()?.let { " $it" } ?: "")
+                    else ->
+                        "Proxy saved and will be used. Automatic region matching and GPS are unavailable " +
+                            "because its country/GPS lookup failed." +
+                            (savedProxy.userWarning()?.let { " $it" } ?: "")
+                }
+                showInfo(message)
             } catch (error: Throwable) {
                 Log.e(TRACE_TAG, "feed_proxy_save_failed package=${tile.packageName} userId=$userId", error)
                 showError(error.message?.takeIf(String::isNotBlank) ?: "Couldn't save the proxy.", null)
@@ -1283,14 +1325,14 @@ class MainActivity : ComponentActivity() {
         showProgress(
             tile.packageName,
             if (feedRegionSettings.isConfigured) {
-                "Preparing the proxy region before creating ${tile.label}…"
+                "Checking the proxy before creating ${tile.label}…"
             } else {
                 "Creating $copiesToCreate ${tile.label} ${if (copiesToCreate == 1) "copy" else "copies"}…"
             }
         )
         lifecycleScope.launch {
             try {
-                val (createdUserIds, googleServicesAvailable) = withContext(Dispatchers.IO) {
+                val (createdUserIds, googleServicesAvailable, proxyWarning) = withContext(Dispatchers.IO) {
                     val regionalFeedProxy = feedProxySettingsMutex.withLock {
                         resolveFeedProxy(feedRegionSettings, "clone_create")
                     }
@@ -1431,7 +1473,11 @@ class MainActivity : ComponentActivity() {
                                     tile.packageName + " userId=" + user.id + " reason=" + googleServices.msg)
                             }
                         }
-                        createdUserIds.toList() to allGoogleServicesAvailable
+                        Triple(
+                            createdUserIds.toList(),
+                            allGoogleServicesAvailable,
+                            regionalFeedProxy?.userWarning()
+                        )
                     } catch (error: Throwable) {
                         createdUserIds.asReversed().forEach { createdUserId ->
                             runCatching {
@@ -1491,10 +1537,11 @@ class MainActivity : ComponentActivity() {
                 } else {
                     " Play Services is unavailable; apps that depend on it may not work."
                 }
+                val proxyNotice = proxyWarning?.let { " $it" }.orEmpty()
                 showInfo(
                     "Created $copiesToCreate ${tile.label} ${if (copiesToCreate == 1) "copy" else "copies"}. " +
                         "Confirm each Home screen prompt to add its icon with the original app name and icon." +
-                        googleServicesNotice
+                        googleServicesNotice + proxyNotice
                 )
                 Log.i(TRACE_TAG, "clone_create event=complete result=success package=${tile.packageName} copies=$copiesToCreate elapsed_ms=${SystemClock.elapsedRealtime() - cloneCreateStarted}")
                 queueHomeShortcutsForCopies(tile, createdUserIds)
@@ -1538,12 +1585,12 @@ class MainActivity : ComponentActivity() {
         ).first()
         showProgress(
             tile.packageName,
-            if (feedRegionSettings.isConfigured) "Testing proxy and detecting its location before adding ${tile.label}…"
+            if (feedRegionSettings.isConfigured) "Checking the proxy before adding ${tile.label}…"
             else "Adding ${tile.label} to container $userId…"
         )
         lifecycleScope.launch {
             try {
-                withContext(Dispatchers.IO) {
+                val proxyWarning = withContext(Dispatchers.IO) {
                     val regionalFeedProxy = feedProxySettingsMutex.withLock {
                         resolveFeedProxy(feedRegionSettings, "container_add")
                     }
@@ -1603,9 +1650,13 @@ class MainActivity : ComponentActivity() {
                         error("Couldn't save the app's private container name.")
                     }
                     runtime.installGoogleSignInServices(userId)
+                    regionalFeedProxy?.userWarning()
                 }
                 refreshApps()
-                showInfo("Added ${tile.label} to container $userId. Its app data is separate from other apps in that container.")
+                showInfo(
+                    "Added ${tile.label} to container $userId. Its app data is separate from other apps in that container." +
+                        (proxyWarning?.let { " $it" } ?: "")
+                )
             } catch (error: Throwable) {
                 showError(error.message?.takeIf(String::isNotBlank) ?: "Couldn't add ${tile.label} to this container.", null)
                 refreshApps()
@@ -2487,7 +2538,7 @@ private fun RegionalFeedCard(
             Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 Text("Proxy & feed region", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "Tap Test proxy to check TCP and UDP and detect the country and approximate GPS before cloning.",
+                    "Test proxy checks the TCP tunnel and UDP relay, then tries to detect the exit country and approximate GPS. UDP or region lookup failures won't block cloning; some app traffic or automatic region matching may be affected.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

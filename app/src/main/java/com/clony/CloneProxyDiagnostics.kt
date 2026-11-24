@@ -39,3 +39,17 @@ internal fun proxyProbeFailureMessage(type: Int, result: Int): String {
         }
     }
 }
+
+/** A failed SOCKS5 UDP check is non-fatal when the TCP tunnel already passed. */
+internal fun proxyProbeUdpWarning(type: Int, result: Int): String? {
+    if (type != 1) return null
+    val stage = result / 1000
+    val code = result % 1000
+    val relayFailure = when (stage) {
+        3 -> "The SOCKS5 UDP relay control connection failed"
+        4 -> if (code == 110) "SOCKS5 UDP ASSOCIATE timed out" else "SOCKS5 UDP ASSOCIATE failed"
+        else -> return null
+    }
+    return "$relayFailure (code $code). TCP traffic will still use the proxy; UDP/QUIC may fail, " +
+        "and UDP requests will not fall back to a direct connection."
+}
