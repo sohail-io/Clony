@@ -78,6 +78,7 @@ tasks.withType(Javadoc) {
 
 
 dependencies {
+    implementation(project(":proxy-engine"))
     implementation fileTree(dir: "libs", include: ["*.jar", "*.aar"])
     implementation(project(":black-reflection"))
     annotationProcessor(project(":compiler"))

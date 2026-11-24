@@ -61,6 +61,7 @@ import black.android.graphics.BRCompatibility;
 import black.android.security.net.config.BRNetworkSecurityConfigProvider;
 import black.com.android.internal.content.BRReferrerIntent;
 import black.dalvik.system.BRVMRuntime;
+import com.clony.proxyengine.NekoProxyEngine;
 import top.niunaijun.blackbox.BlackBoxCore;
 import top.niunaijun.blackbox.app.configuration.AppLifecycleCallback;
 import top.niunaijun.blackbox.app.dispatcher.AppServiceDispatcher;
@@ -227,10 +228,34 @@ public class BActivityThread extends IBActivityThread.Stub {
             long proxyConfigureStarted = SystemClock.elapsedRealtime();
             Log.i("ClonyCloneProxy", "event=proxy_configure_begin package=" + appConfig.packageName
                     + " userId=" + appConfig.userId + " type=" + appConfig.proxyType);
-            if (!NativeCore.configureProxy(appConfig.proxyType, appConfig.proxyHost, appConfig.proxyPort,
-                    appConfig.proxyUser.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                    appConfig.proxyPassword.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                    appConfig.proxyType == 1)) {
+            int nativeProxyType = 0;
+            int nativeProxyPort = 0;
+            String nativeProxyHost = "";
+            byte[] nativeProxyUser = new byte[0];
+            byte[] nativeProxyPassword = new byte[0];
+            if (appConfig.proxyType != 0) {
+                try {
+                    nativeProxyPort = NekoProxyEngine.start(
+                            BlackBoxCore.getContext(),
+                            appConfig.proxyType,
+                            appConfig.proxyHost,
+                            appConfig.proxyPort,
+                            appConfig.proxyUser,
+                            appConfig.proxyPassword);
+                    nativeProxyType = 1;
+                    nativeProxyHost = "127.0.0.1";
+                } catch (Throwable error) {
+                    android.util.Log.e("ClonyCloneProxy", "event=proxy_configure result=failure"
+                            + " stage=sing_box_start package=" + appConfig.packageName
+                            + " userId=" + appConfig.userId
+                            + " elapsed_ms=" + (SystemClock.elapsedRealtime() - proxyConfigureStarted)
+                            + " endpoint_or_credentials_logged=false", error);
+                    android.os.Process.killProcess(android.os.Process.myPid());
+                    throw new IllegalStateException("Proxy engine initialization failed; direct fallback refused", error);
+                }
+            }
+            if (!NativeCore.configureProxy(nativeProxyType, nativeProxyHost, nativeProxyPort,
+                    nativeProxyUser, nativeProxyPassword, nativeProxyType == 1)) {
                 android.util.Log.e("ClonyCloneProxy", "event=proxy_configure result=failure"
                         + " package=" + appConfig.packageName + " userId=" + appConfig.userId
                         + " elapsed_ms=" + (SystemClock.elapsedRealtime() - proxyConfigureStarted)
@@ -240,8 +265,7 @@ public class BActivityThread extends IBActivityThread.Stub {
             }
             android.util.Log.i("ClonyCloneProxy", "event=proxy_configure result=success"
                     + " package=" + appConfig.packageName + " userId=" + appConfig.userId
-                    + " transport=" + (appConfig.proxyType == 2 ? "http_connect_tcp"
-                    : appConfig.proxyType == 1 ? "socks5_tcp_udp" : "direct")
+                    + " transport=" + (appConfig.proxyType == 0 ? "direct" : "sing_box_local_socks")
                     + " elapsed_ms=" + (SystemClock.elapsedRealtime() - proxyConfigureStarted)
                     + " endpoint_or_credentials_logged=false");
             CloneNetworkIdentityStore.Options feedIdentity = CloneNetworkIdentityStore.read(
@@ -555,18 +579,12 @@ public class BActivityThread extends IBActivityThread.Stub {
                 
                 
                 if (application == null) {
-                    Slog.w(TAG, "Creating minimal application context as fallback");
-                    try {
-                        
-                        application = (Application) packageContext;
-                        if (application == null) {
-                            Slog.e(TAG, "Even package context is null, this is critical");
-                            throw new RuntimeException("Unable to create application context");
-                        }
-                    } catch (Exception contextException) {
-                        Slog.e(TAG, "Failed to create fallback application context", contextException);
-                        throw new RuntimeException("Unable to makeApplication - all fallback attempts failed", contextException);
-                    }
+                    Slog.w(TAG, "Both LoadedApk creation attempts failed; creating an Application fallback");
+                    application = createApplicationWithFallback(applicationInfo);
+                }
+
+                if (application == null) {
+                    throw new RuntimeException("Unable to makeApplication - all fallback attempts failed");
                 }
             }
             
@@ -823,17 +841,17 @@ public class BActivityThread extends IBActivityThread.Stub {
             }
             
             
-            try {
-                Method attachBaseContext = Application.class.getDeclaredMethod("attachBaseContext", Context.class);
-                attachBaseContext.setAccessible(true);
-                attachBaseContext.invoke(application, packageContext);
-                Slog.d(TAG, "Successfully attached base context to application: " + appInfo.className);
-            } catch (Exception e) {
-                Slog.w(TAG, "Could not attach base context to application: " + e.getMessage());
+            Method attachBaseContext = ContextWrapper.class.getDeclaredMethod("attachBaseContext", Context.class);
+            attachBaseContext.setAccessible(true);
+            attachBaseContext.invoke(application, packageContext);
+            if (application.getBaseContext() == null) {
+                throw new IllegalStateException("Application base context is still null after attachment");
             }
+            Slog.d(TAG, "Successfully attached base context to application: " + appInfo.className);
             
         } catch (Exception e) {
-            Slog.e(TAG, "Error ensuring application base context: " + e.getMessage());
+            Slog.e(TAG, "Error ensuring application base context for " + appInfo.className, e);
+            throw new IllegalStateException("Unable to attach base context to " + appInfo.className, e);
         }
     }
     

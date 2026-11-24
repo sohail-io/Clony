@@ -18,6 +18,8 @@ import top.niunaijun.blackbox.app.configuration.AppLifecycleCallback
 import top.niunaijun.blackbox.app.configuration.ClientConfiguration
 import top.niunaijun.blackbox.utils.VirtualRuntimeTrace
 import top.niunaijun.blackbox.utils.SimpleCrashFix
+import io.nekohasekai.sagernet.database.DataStore
+import io.nekohasekai.sagernet.utils.Theme
 import java.security.MessageDigest
 import java.util.Collections
 import java.util.WeakHashMap
@@ -142,7 +144,7 @@ private object RecaptchaWebCompatibility {
     }
 }
 
-class ClonyApplication : Application() {
+class ClonyApplication : io.nekohasekai.sagernet.SagerNet() {
     override fun attachBaseContext(base: Context) {
         super.attachBaseContext(base)
 
@@ -256,7 +258,15 @@ class ClonyApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        if (applicationInfo.processName == packageName) {
+            DataStore.appTheme = Theme.BLACK
+            DataStore.nightTheme = 1
+            Theme.currentNightMode = 1
+            Theme.applyNightTheme()
+        }
         BlackBoxCore.get().doCreate()
-        CloneShortcutMigration.migratePinnedShortcuts(this)
+        if (applicationInfo.processName == packageName) {
+            CloneShortcutMigration.migratePinnedShortcuts(this)
+        }
     }
 }

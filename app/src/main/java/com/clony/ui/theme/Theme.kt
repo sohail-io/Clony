@@ -1,57 +1,52 @@
 package com.clony.ui.theme
 
-import android.app.Activity
-import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.platform.LocalContext
 
-private val DarkColorScheme = darkColorScheme(
-    primary = Purple80,
-    secondary = PurpleGrey80,
-    tertiary = Pink80
-)
-
-private val LightColorScheme = lightColorScheme(
-    primary = Purple40,
-    secondary = PurpleGrey40,
-    tertiary = Pink40
-
-    /* Other default colors to override
-    background = Color(0xFFFFFBFE),
-    surface = Color(0xFFFFFBFE),
-    onPrimary = Color.White,
-    onSecondary = Color.White,
-    onTertiary = Color.White,
-    onBackground = Color(0xFF1C1B1F),
-    onSurface = Color(0xFF1C1B1F),
-    */
+private val BlackAndWhiteColorScheme = darkColorScheme(
+    primary = MonoWhite,
+    onPrimary = MonoBlack,
+    primaryContainer = MonoSurfaceContainerHighest,
+    onPrimaryContainer = MonoWhite,
+    inversePrimary = MonoSurfaceContainerHigh,
+    secondary = MonoOnSurfaceVariant,
+    onSecondary = MonoBlack,
+    secondaryContainer = MonoSurfaceContainerHigh,
+    onSecondaryContainer = MonoWhite,
+    tertiary = MonoWhite,
+    onTertiary = MonoBlack,
+    tertiaryContainer = MonoSurfaceContainer,
+    onTertiaryContainer = MonoWhite,
+    background = MonoBlack,
+    onBackground = MonoWhite,
+    surface = MonoSurface,
+    onSurface = MonoWhite,
+    surfaceVariant = MonoSurfaceVariant,
+    onSurfaceVariant = MonoOnSurfaceVariant,
+    surfaceTint = MonoWhite,
+    inverseSurface = MonoWhite,
+    inverseOnSurface = MonoBlack,
+    surfaceBright = MonoSurfaceContainerHighest,
+    surfaceDim = MonoBlack,
+    surfaceContainerLowest = MonoBlack,
+    surfaceContainerLow = MonoSurfaceContainerLow,
+    surfaceContainer = MonoSurfaceContainer,
+    surfaceContainerHigh = MonoSurfaceContainerHigh,
+    surfaceContainerHighest = MonoSurfaceContainerHighest,
+    error = MonoWhite,
+    onError = MonoBlack,
+    errorContainer = MonoSurfaceContainerHighest,
+    onErrorContainer = MonoWhite,
+    outline = MonoOutline,
+    outlineVariant = MonoOutlineVariant,
+    scrim = MonoBlack
 )
 
 @Composable
-fun ClonyTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    // Dynamic color is available on Android 12+
-    dynamicColor: Boolean = true,
-    content: @Composable () -> Unit
-) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
-    }
-
+fun ClonyTheme(content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = colorScheme,
+        colorScheme = BlackAndWhiteColorScheme,
         typography = Typography,
         content = content
     )

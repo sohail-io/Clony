@@ -13,6 +13,9 @@ its assigned copy through TikViral. The original app is still running inside
 BlackBox, so the shortcut does not create a separate Android security sandbox
 or change the guest app's package identity.
 
+NekoBox for Android is integrated as the third tab. It opens NekoBox's native
+profile manager and proxy controls inside the Clony app.
+
 ## Current limits
 
 - TikViral supports up to 10 virtual copies per source app. Home-screen shortcuts

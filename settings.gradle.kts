@@ -26,11 +26,14 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        maven(url = "https://jitpack.io")
     }
 }
 
 rootProject.name = "Clony"
 include(":app")
+include(":proxy-engine")
+include(":nekobox")
 include(":Bcore")
 include(":black-reflection")
 include(":compiler")
@@ -38,3 +41,4 @@ include(":compiler")
 project(":Bcore").projectDir = file("third_party/BlackBoxReborn/Bcore")
 project(":black-reflection").projectDir = file("third_party/BlackBoxReborn/black-reflection")
 project(":compiler").projectDir = file("third_party/BlackBoxReborn/compiler")
+project(":nekobox").projectDir = file("third_party/NekoBoxForAndroid/app")

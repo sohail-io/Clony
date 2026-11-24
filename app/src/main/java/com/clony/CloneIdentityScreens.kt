@@ -285,7 +285,7 @@ internal fun ConnectionOperatorInfoScreen(
                 description = if (settings.matchProxyRegion) {
                     "This copy reports ${settings.proxyCountryIso.uppercase(Locale.ROOT)} for SIM and network country, and suppresses local SIM, operator and cell details."
                 } else {
-                    "Save a proxy in Proxy / network to detect its exit country and apply it to this copy."
+                    "This copy reports the device's SIM and network country."
                 },
                 status = if (settings.matchProxyRegion) "Proxy matched" else "Device region",
                 active = settings.matchProxyRegion
