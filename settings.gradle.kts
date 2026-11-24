@@ -31,6 +31,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "Clony"
 include(":app")
+include(":proxy-engine")
 include(":Bcore")
 include(":black-reflection")
 include(":compiler")

@@ -61,12 +61,46 @@ val generateLauncherAssets = tasks.register<Exec>("generateLauncherAssets") {
     )
 }
 
+val generatedCloneAliasDir = layout.buildDirectory.dir("generated/clone-package-alias")
+tasks.register<Exec>("buildCloneAliasLauncher") {
+    val launcherScript = rootProject.file("launcher-tools/build_launchers.py")
+    val launcherSource = rootProject.file("launcher-tools/LauncherActivity.java")
+    val packageAlias = providers.gradleProperty("cloneAliasPackage")
+    val aliasLabel = providers.gradleProperty("cloneAliasLabel")
+    inputs.files(launcherScript, launcherSource, debugSigningKey)
+    inputs.property("cloneAliasPackage", packageAlias.orElse(""))
+    inputs.property("cloneAliasLabel", aliasLabel.orElse(""))
+    outputs.dir(generatedCloneAliasDir)
+    doFirst {
+        val requestedAlias = packageAlias.orNull?.trim()?.takeIf(String::isNotEmpty)
+            ?: throw GradleException("Pass -PcloneAliasPackage=<clone package alias>.")
+        val label = aliasLabel.orNull?.trim()?.takeIf(String::isNotEmpty) ?: requestedAlias
+        val aliasApk = generatedCloneAliasDir.get()
+            .file("${requestedAlias.substringAfterLast('.')}.apk")
+        commandLine(
+            "python3",
+            launcherScript.absolutePath,
+            "--sdk", androidComponents.sdkComponents.sdkDirectory.get().asFile.absolutePath,
+            "--jdk", System.getProperty("java.home"),
+            "--output", generatedCloneAliasDir.get().asFile.absolutePath,
+            "--host-package", android.defaultConfig.applicationId ?: "com.clony",
+            "--keystore", debugSigningKey.absolutePath,
+            "--build-tools", "36.1.0",
+            "--package-alias", requestedAlias,
+            "--alias-label", label,
+            "--output-apk", aliasApk.asFile.absolutePath
+        )
+    }
+}
+
 tasks.named("preBuild").configure {
     dependsOn(generateLauncherAssets)
+    dependsOn(":proxy-engine:buildEmbeddedCore")
 }
 
 dependencies {
     implementation(project(":Bcore"))
+    implementation(files(rootProject.file("proxy-engine/build/embedded/libcore.aar")))
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)

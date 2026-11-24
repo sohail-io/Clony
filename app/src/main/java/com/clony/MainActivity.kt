@@ -500,7 +500,10 @@ class MainActivity : ComponentActivity() {
                         .groupBy { it.applicationInfo.packageName }
                         .flatMap { (packageName, activities) ->
                             val activity = activities.firstOrNull() ?: return@flatMap emptyList()
-                            if (packageName == this@MainActivity.packageName || LauncherRegistry.slot(packageName) != null) {
+                            if (packageName == this@MainActivity.packageName ||
+                                LauncherRegistry.slot(packageName) != null ||
+                                ClonePackageNameStore.resolve(this@MainActivity, packageName) != null
+                            ) {
                                 return@flatMap emptyList()
                             }
                             runCatching {
@@ -793,7 +796,13 @@ class MainActivity : ComponentActivity() {
                 Log.i(TRACE_TAG, "clone_delete stage=shortcut_cleanup_complete package=${tile.packageName} userId=$userId")
                 CloneLaunchers.remove(this@MainActivity, tile.packageName, userId)
                 refreshApps()
-                val launcherUninstallRequested = tile.launcherPackage?.let { launcherPackage ->
+                val aliasPackageToUninstall = listOfNotNull(
+                    tile.customPackageName,
+                    tile.launcherPackage
+                ).distinct().firstOrNull { packageName ->
+                    CloneLaunchers.isInstalled(this@MainActivity, packageName)
+                }
+                val launcherUninstallRequested = aliasPackageToUninstall?.let { launcherPackage ->
                     if (CloneLaunchers.isInstalled(this@MainActivity, launcherPackage)) {
                         runCatching {
                             startActivity(Intent(
@@ -801,7 +810,7 @@ class MainActivity : ComponentActivity() {
                                 android.net.Uri.parse("package:$launcherPackage")
                             ).putExtra(Intent.EXTRA_RETURN_RESULT, true))
                         }.onFailure {
-                            Log.w(TRACE_TAG, "clone_delete stage=launcher_uninstall_prompt_failed package=$launcherPackage", it)
+                            Log.w(TRACE_TAG, "clone_delete stage=alias_uninstall_prompt_failed package=$launcherPackage", it)
                         }.isSuccess
                     } else {
                         false
@@ -809,7 +818,7 @@ class MainActivity : ComponentActivity() {
                 } ?: false
                 showInfo(
                     if (launcherUninstallRequested) {
-                        "Deleted $label and its app data. Its pinned Home screen shortcut is disabled. Confirm Android's prompt to remove its separate launcher icon."
+                        "Deleted $label and its app data. Its Home screen shortcut is disabled. Confirm Android's prompt to remove its ADB package alias."
                     } else {
                         "Deleted $label and its app data. Its pinned Home screen shortcut is disabled."
                     }
@@ -2659,7 +2668,12 @@ private fun CloneCountSheet(
                     names = packageNameDrafts(app, next, occupiedNames, firstCopyNumber, names); count = next
                 }, enabled = count < maxCount) { Text("+") }
             }
-            Text("Copy identifiers", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Text("ADB package aliases", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Text(
+                "Install an alias launcher for each name to make it visible to Android's package manager.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             repeat(count) { index ->
                 val value = names.getOrElse(index) { "" }
                 val id = value.trim()

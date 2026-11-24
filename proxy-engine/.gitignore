@@ -1,0 +1,6 @@
+/libneko/
+/sing-box/
+/.cache/
+/native/libcore/.build/
+/native/libcore/gomobile/
+/build/

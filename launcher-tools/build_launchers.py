@@ -9,6 +9,7 @@ import re
 import subprocess
 import tempfile
 import zipfile
+from xml.sax.saxutils import escape
 
 
 parser = argparse.ArgumentParser()
@@ -18,10 +19,19 @@ parser.add_argument("--output", type=pathlib.Path, required=True)
 parser.add_argument("--host-package", required=True)
 parser.add_argument("--keystore", type=pathlib.Path, required=True)
 parser.add_argument("--build-tools", default="36.1.0")
+parser.add_argument("--package-alias", help="Build one ADB-visible launcher using this package name")
+parser.add_argument("--alias-label", help="Visible name for the package-alias launcher")
+parser.add_argument("--output-apk", type=pathlib.Path, help="Output path for --package-alias mode")
 args = parser.parse_args()
 
 if not re.fullmatch(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+", args.host_package):
     raise SystemExit("Invalid Android host package name")
+if args.package_alias and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+", args.package_alias):
+    raise SystemExit("Invalid clone package alias")
+if args.package_alias and not args.output_apk:
+    raise SystemExit("--output-apk is required with --package-alias")
+if args.output_apk and not args.package_alias:
+    raise SystemExit("--output-apk can only be used with --package-alias")
 
 root = pathlib.Path(__file__).resolve().parent.parent
 sdk, jdk = args.sdk.resolve(), args.jdk.resolve()
@@ -48,7 +58,8 @@ def run(*command):
 
 
 output = args.output.resolve() / "launchers"
-output.mkdir(parents=True, exist_ok=True)
+if not args.package_alias:
+    output.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryDirectory(prefix="clony-launchers-") as temporary:
     temp = pathlib.Path(temporary)
     classes = temp / "classes"
@@ -73,16 +84,15 @@ with tempfile.TemporaryDirectory(prefix="clony-launchers-") as temporary:
         classes / "com/clony/launcher/LauncherActivity.class",
     )
 
-    def build(slot):
-        work = temp / str(slot)
+    def build(package_name, app_label, apk, work):
         work.mkdir()
         values = work / "res" / "values"
         values.mkdir(parents=True)
         (values / "strings.xml").write_text(
-            f'<resources><string name="app_name">TikViral Copy {slot}</string></resources>'
+            f'<resources><string name="app_name">{escape(app_label)}</string></resources>'
         )
         manifest = work / "AndroidManifest.xml"
-        manifest.write_text(f'''<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.clony.launcher.copy{slot}" android:versionCode="1" android:versionName="1.0">
+        manifest.write_text(f'''<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="{package_name}" android:versionCode="1" android:versionName="1.0">
 <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="28" />
 <application android:label="@string/app_name" android:allowBackup="false" android:theme="@android:style/Theme.Translucent.NoTitleBar">
 <activity android:name="com.clony.launcher.LauncherActivity" android:exported="true" android:excludeFromRecents="true">
@@ -95,7 +105,7 @@ with tempfile.TemporaryDirectory(prefix="clony-launchers-") as temporary:
         with zipfile.ZipFile(raw, "a", zipfile.ZIP_DEFLATED) as archive:
             archive.write(dex / "classes.dex", "classes.dex")
         run(build_tools / "zipalign", "-f", "4", raw, aligned)
-        apk = output / f"copy{slot}.apk"
+        apk.parent.mkdir(parents=True, exist_ok=True)
         run(
             build_tools / "apksigner", "sign",
             "--ks", keystore,
@@ -112,11 +122,25 @@ with tempfile.TemporaryDirectory(prefix="clony-launchers-") as temporary:
             env=env,
             text=True,
         )
-        assert f"package: name='com.clony.launcher.copy{slot}'" in result
-        assert f"application: label='TikViral Copy {slot}'" in result
+        assert f"package: name='{package_name}'" in result
+        assert f"application: label='{app_label}'" in result
         assert "launchable-activity: name='com.clony.launcher.LauncherActivity'" in result
-        return slot
+        return apk
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        completed = list(pool.map(build, range(1, 101)))
-    print(f"Built {len(completed)} signed launcher APKs in {output}")
+    if args.package_alias:
+        apk = args.output_apk.resolve()
+        label = args.alias_label or args.package_alias
+        build(args.package_alias, label, apk, temp / "package-alias")
+        print(f"Built ADB package alias {args.package_alias} at {apk}")
+    else:
+        def build_slot(slot):
+            return build(
+                f"com.clony.launcher.copy{slot}",
+                f"TikViral Copy {slot}",
+                output / f"copy{slot}.apk",
+                temp / str(slot),
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            completed = list(pool.map(build_slot, range(1, 101)))
+        print(f"Built {len(completed)} signed launcher APKs in {output}")

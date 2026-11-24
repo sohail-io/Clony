@@ -16,6 +16,16 @@ The vendored Android manifest was narrowed to runtime networking and service
 permissions, and internal proxy components were made non-exported where the
 system does not need to bind them. Play Integrity interception was removed.
 
+## NekoBox / sing-box proxy core
+
+Clony includes NekoBox's GPL-3.0-or-later `libcore` source in
+`proxy-engine/native/libcore/`, together with its upstream license. The build
+script fetches the sing-box and libneko revisions pinned by the inspected
+NekoBox source and packages them into the app's generated `libcore.aar`.
+The exact revision pins and build requirements are documented in
+[`proxy-engine/README.md`](proxy-engine/README.md). The generated AAR is not
+committed.
+
 ## Other dependencies
 
 The vendored annotation processor uses AutoService and JavaPoet. Their

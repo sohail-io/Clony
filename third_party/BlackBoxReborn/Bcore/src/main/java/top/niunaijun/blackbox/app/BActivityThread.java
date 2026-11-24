@@ -61,6 +61,7 @@ import black.android.graphics.BRCompatibility;
 import black.android.security.net.config.BRNetworkSecurityConfigProvider;
 import black.com.android.internal.content.BRReferrerIntent;
 import black.dalvik.system.BRVMRuntime;
+import com.clony.proxyengine.NekoProxyEngine;
 import top.niunaijun.blackbox.BlackBoxCore;
 import top.niunaijun.blackbox.app.configuration.AppLifecycleCallback;
 import top.niunaijun.blackbox.app.dispatcher.AppServiceDispatcher;
@@ -227,10 +228,34 @@ public class BActivityThread extends IBActivityThread.Stub {
             long proxyConfigureStarted = SystemClock.elapsedRealtime();
             Log.i("ClonyCloneProxy", "event=proxy_configure_begin package=" + appConfig.packageName
                     + " userId=" + appConfig.userId + " type=" + appConfig.proxyType);
-            if (!NativeCore.configureProxy(appConfig.proxyType, appConfig.proxyHost, appConfig.proxyPort,
-                    appConfig.proxyUser.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                    appConfig.proxyPassword.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                    appConfig.proxyType == 1)) {
+            int nativeProxyType = 0;
+            int nativeProxyPort = 0;
+            String nativeProxyHost = "";
+            byte[] nativeProxyUser = new byte[0];
+            byte[] nativeProxyPassword = new byte[0];
+            if (appConfig.proxyType != 0) {
+                try {
+                    nativeProxyPort = NekoProxyEngine.start(
+                            BlackBoxCore.getContext(),
+                            appConfig.proxyType,
+                            appConfig.proxyHost,
+                            appConfig.proxyPort,
+                            appConfig.proxyUser,
+                            appConfig.proxyPassword);
+                    nativeProxyType = 1;
+                    nativeProxyHost = "127.0.0.1";
+                } catch (Throwable error) {
+                    android.util.Log.e("ClonyCloneProxy", "event=proxy_configure result=failure"
+                            + " stage=sing_box_start package=" + appConfig.packageName
+                            + " userId=" + appConfig.userId
+                            + " elapsed_ms=" + (SystemClock.elapsedRealtime() - proxyConfigureStarted)
+                            + " endpoint_or_credentials_logged=false", error);
+                    android.os.Process.killProcess(android.os.Process.myPid());
+                    throw new IllegalStateException("Proxy engine initialization failed; direct fallback refused", error);
+                }
+            }
+            if (!NativeCore.configureProxy(nativeProxyType, nativeProxyHost, nativeProxyPort,
+                    nativeProxyUser, nativeProxyPassword, nativeProxyType == 1)) {
                 android.util.Log.e("ClonyCloneProxy", "event=proxy_configure result=failure"
                         + " package=" + appConfig.packageName + " userId=" + appConfig.userId
                         + " elapsed_ms=" + (SystemClock.elapsedRealtime() - proxyConfigureStarted)
@@ -240,8 +265,7 @@ public class BActivityThread extends IBActivityThread.Stub {
             }
             android.util.Log.i("ClonyCloneProxy", "event=proxy_configure result=success"
                     + " package=" + appConfig.packageName + " userId=" + appConfig.userId
-                    + " transport=" + (appConfig.proxyType == 2 ? "http_connect_tcp"
-                    : appConfig.proxyType == 1 ? "socks5_tcp_udp" : "direct")
+                    + " transport=" + (appConfig.proxyType == 0 ? "direct" : "sing_box_local_socks")
                     + " elapsed_ms=" + (SystemClock.elapsedRealtime() - proxyConfigureStarted)
                     + " endpoint_or_credentials_logged=false");
             CloneNetworkIdentityStore.Options feedIdentity = CloneNetworkIdentityStore.read(

@@ -71,6 +71,11 @@ Clony changes:
   unknown/false when the virtual package service is unhealthy instead of
   consulting the host package manager, which had falsely labeled every host
   app as a clone.
+- Per-copy proxy startup now launches the NekoBox sing-box engine from the
+  separate `:proxy-engine` module and points the existing process socket hook
+  at its local SOCKS5 inbound. The proxy type and credentials remain isolated
+  in each clone's process configuration. NekoBox's VPN socket-protection call
+  is bypassed because Clony runs this core without a device-wide VPN service.
 
 - The runtime launch screen shows an indeterminate progress indicator and resolves
   the app label/icon from the installed source app during startup. Clony hands

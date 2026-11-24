@@ -15,6 +15,21 @@ internal object ClonePackageNameStore {
     fun read(context: Context, sourcePackageName: String, userId: Int): String? =
         preferences(context).getString(key(sourcePackageName, userId), null)
 
+    /** Resolves a persisted ADB-facing package alias to its virtual guest package and user. */
+    fun resolve(context: Context, packageAlias: String): Pair<String, Int>? {
+        if (!isValid(packageAlias)) return null
+        val assignments = preferences(context).all
+        for ((assignmentKey, storedAlias) in assignments) {
+            if (storedAlias != packageAlias) continue
+            val split = assignmentKey.lastIndexOf(':')
+            if (split <= 0) continue
+            val sourcePackageName = assignmentKey.substring(0, split)
+            val userId = assignmentKey.substring(split + 1).toIntOrNull() ?: continue
+            if (userId > 0 && isValid(sourcePackageName)) return sourcePackageName to userId
+        }
+        return null
+    }
+
     fun isValid(packageName: String): Boolean {
         val value = packageName.trim()
         return value.length in 1..MAX_LENGTH && packagePattern.matches(value)
