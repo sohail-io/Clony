@@ -603,6 +603,10 @@ public class BActivityThread extends IBActivityThread.Stub {
             }
             
             mInitialApplication = application;
+            // The manual fallback path does not populate LoadedApk.mApplication like
+            // LoadedApk.makeApplication() does. ContextImpl.getApplicationContext()
+            // reads this field on Android 17, so keep it in sync with the thread.
+            BRLoadedApk.get(loadedApk)._set_mApplication(application);
             BRActivityThread.get(BlackBoxCore.mainThread())._set_mInitialApplication(mInitialApplication);
             ContextCompat.fix((Context) BRActivityThread.get(BlackBoxCore.mainThread()).getSystemContext());
             ContextCompat.fix(mInitialApplication);
@@ -776,6 +780,15 @@ public class BActivityThread extends IBActivityThread.Stub {
     
     private ClassLoader getClassLoader(android.content.pm.ApplicationInfo appInfo) {
         try {
+            // Reuse LoadedApk's class loader when normal Application creation
+            // fails. It already includes the virtual app's native libraries and
+            // all installed split APKs.
+            if (mBoundApplication != null && mBoundApplication.info != null) {
+                ClassLoader loadedApkClassLoader = BRLoadedApk.get(mBoundApplication.info).getClassLoader();
+                if (loadedApkClassLoader != null) {
+                    return loadedApkClassLoader;
+                }
+            }
             
             String sourceDir = appInfo.sourceDir;
             if (sourceDir != null) {
@@ -788,7 +801,7 @@ public class BActivityThread extends IBActivityThread.Stub {
                     }
                 }
                 return new dalvik.system.PathClassLoader(
-                        dexPath.toString(), ClassLoader.getSystemClassLoader());
+                        dexPath.toString(), appInfo.nativeLibraryDir, ClassLoader.getSystemClassLoader());
             }
             
             

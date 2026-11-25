@@ -74,6 +74,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.asAndroidBitmap
@@ -82,6 +83,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -97,14 +100,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import com.clony.ui.theme.ClonyTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import top.niunaijun.blackbox.BlackBoxCore
@@ -147,6 +144,11 @@ private enum class CloneFeatureScreen {
 private data class CloneProxyProfileOption(
     val profile: ProxyEntity,
     val groupName: String
+)
+
+private data class CloneProxyDisplay(
+    val applied: Boolean,
+    val profileName: String?
 )
 
 private fun ProxyEntity.toCloneProxyConfig(): CloneProxyConfig {
@@ -222,7 +224,7 @@ data class AppTile(
     val displayName: String get() = if (isCloned) "$label ${copyNumber ?: 1}" else label
 }
 
-private fun cloneIpv4Key(app: AppTile): String = "${app.packageName}:${app.virtualUserId ?: -1}"
+private fun cloneProxyKey(app: AppTile): String = "${app.packageName}:${app.virtualUserId ?: -1}"
 
 class MainActivity : ComponentActivity() {
     private val networkIdentitySettingsMutex = Mutex()
@@ -1599,9 +1601,8 @@ private fun ClonyHomeRedesigned(
         lifecycle?.addObserver(observer)
         onDispose { lifecycle?.removeObserver(observer) }
     }
-    var ipv4ByClone by remember { mutableStateOf(emptyMap<String, String>()) }
+    var proxyDisplayByClone by remember { mutableStateOf(emptyMap<String, CloneProxyDisplay>()) }
     var phonePublicIpv4 by remember { mutableStateOf("Checking…") }
-    val ipv4LookupSemaphore = remember { Semaphore(4) }
     val systemApps = remember(apps) {
         apps.groupBy { it.packageName }.values.map { copies ->
             copies.first().copy(
@@ -1617,23 +1618,33 @@ private fun ClonyHomeRedesigned(
         if (selectedTab != 0 || detailPackage != null || !activityResumed) return@LaunchedEffect
         phonePublicIpv4 = ClonePublicIpv4Lookup.fetchPhonePublicIpv4() ?: "Unavailable"
     }
-    LaunchedEffect(selectedTab, detailPackage, clones, activityResumed) {
-        if (selectedTab != 0 || detailPackage != null || !activityResumed || clones.isEmpty()) {
+    LaunchedEffect(selectedTab, detailPackage, activityResumed, clones, busyPackageName) {
+        if (selectedTab != 0 || detailPackage != null || !activityResumed ||
+            busyPackageName != null || clones.isEmpty()
+        ) {
             return@LaunchedEffect
         }
-        while (true) {
-            ipv4ByClone = clones.associate { cloneIpv4Key(it) to "Checking…" }
-            coroutineScope {
-                clones.map { clone ->
-                    async {
-                        val address = ipv4LookupSemaphore.withPermit {
-                            ClonePublicIpv4Lookup.fetch(context.applicationContext, clone)
-                        } ?: "Unavailable"
-                        ipv4ByClone = ipv4ByClone + (cloneIpv4Key(clone) to address)
-                    }
-                }.awaitAll()
+        val savedProxyProfiles = withContext(Dispatchers.IO) {
+            SagerDatabase.proxyDao.getAll().mapNotNull { profile ->
+                runCatching { profile.toCloneProxyConfig() to profile.displayName() }.getOrNull()
             }
-            delay(60_000L)
+        }
+        proxyDisplayByClone = withContext(Dispatchers.IO) {
+            clones.associate { clone ->
+                val display = runCatching {
+                    val userId = clone.virtualUserId ?: return@runCatching CloneProxyDisplay(false, null)
+                    val config = CloneProxyStore.read(context.applicationContext, clone.packageName, userId)
+                    if (config.type == 0) {
+                        CloneProxyDisplay(false, null)
+                    } else {
+                        val profileName = savedProxyProfiles.firstOrNull { (savedConfig, _) ->
+                            config.matches(savedConfig)
+                        }?.second ?: "Unknown proxy"
+                        CloneProxyDisplay(true, profileName)
+                    }
+                }.getOrDefault(CloneProxyDisplay(false, null))
+                cloneProxyKey(clone) to display
+            }
         }
     }
     val containers = remember(clones) {
@@ -2053,7 +2064,8 @@ private fun ClonyHomeRedesigned(
                                     row.forEach { app ->
                                         AppGridTile(
                                             app = app,
-                                            publicIpv4 = ipv4ByClone[cloneIpv4Key(app)] ?: "Checking…",
+                                            proxyProfileName = proxyDisplayByClone[cloneProxyKey(app)]?.profileName,
+                                            proxyApplied = proxyDisplayByClone[cloneProxyKey(app)]?.applied == true,
                                             isBusy = busyPackageName == app.packageName,
                                             isEnabled = busyPackageName == null,
                                             modifier = Modifier.weight(1f),
@@ -2553,7 +2565,8 @@ private fun CloneProxyPickerSheet(
 @Composable
 private fun AppGridTile(
     app: AppTile,
-    publicIpv4: String,
+    proxyProfileName: String?,
+    proxyApplied: Boolean,
     isBusy: Boolean,
     isEnabled: Boolean,
     modifier: Modifier = Modifier,
@@ -2579,6 +2592,17 @@ private fun AppGridTile(
             verticalArrangement = Arrangement.spacedBy(9.dp)
         ) {
         Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 8.dp)
+                    .size(11.dp)
+                    .clip(CircleShape)
+                    .background(if (proxyApplied) Color(0xFF4CAF50) else MaterialTheme.colorScheme.error)
+                    .semantics {
+                        contentDescription = if (proxyApplied) "Proxy applied" else "Proxy not applied"
+                    }
+            )
             TextButton(
                 onClick = { actionsExpanded = true },
                 enabled = isEnabled
@@ -2654,13 +2678,15 @@ private fun AppGridTile(
                     }
                 )
             )
-            Text(
-                "IPv4: $publicIpv4",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            proxyProfileName?.let { profileName ->
+                Text(
+                    "Proxy: $profileName",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
         }
     }

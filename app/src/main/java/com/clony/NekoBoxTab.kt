@@ -1,22 +1,33 @@
 package com.clony
 
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ScrollableTabRow
@@ -35,10 +46,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
-import androidx.activity.ComponentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import io.nekohasekai.sagernet.SagerNet
@@ -58,8 +72,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private data class SocksEndpoint(
-    val server: String,
+private data class ProxyEndpoint(
+    val host: String,
     val port: Int,
     val username: String,
     val password: String
@@ -70,9 +84,13 @@ private data class SocksEndpoint(
 fun NekoBoxTabScreen(modifier: Modifier = Modifier) {
     val activity = LocalContext.current as ComponentActivity
     val scope = rememberCoroutineScope()
-    var endpointText by remember { mutableStateOf("") }
+    var proxyName by remember { mutableStateOf("") }
+    var proxyAddress by remember { mutableStateOf("") }
+    var dialogError by remember { mutableStateOf<String?>(null) }
+    var showAddDialog by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var groups by remember { mutableStateOf<List<ProxyGroup>>(emptyList()) }
+    var groupMenuExpanded by remember { mutableStateOf(false) }
     var selectedGroupId by remember { mutableStateOf(DataStore.selectedGroup) }
     var profiles by remember { mutableStateOf<List<ProxyEntity>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
@@ -115,7 +133,7 @@ fun NekoBoxTabScreen(modifier: Modifier = Modifier) {
             }
 
             override fun missingPlugin(profileName: String, pluginName: String) {
-                message = "${profileName} requires plugin ${pluginName}."
+                message = "$profileName requires plugin $pluginName."
             }
         }
     }
@@ -188,6 +206,12 @@ fun NekoBoxTabScreen(modifier: Modifier = Modifier) {
         if (permissionDenied) message = "VPN permission was not granted."
     }
 
+    fun disconnectProxy() {
+        val stoppedByService = runCatching { connection.service?.stop() == true }
+            .getOrDefault(false)
+        if (!stoppedByService) SagerNet.stopService()
+    }
+
     fun selectProfile(profile: ProxyEntity) {
         val changed = DataStore.selectedProxy != profile.id
         DataStore.selectedProxy = profile.id
@@ -197,8 +221,11 @@ fun NekoBoxTabScreen(modifier: Modifier = Modifier) {
     }
 
     fun connectProfile(profile: ProxyEntity) {
-        if (serviceState.canStop && DataStore.selectedProxy == profile.id) {
-            SagerNet.stopService()
+        // Use the same selection state as the card label. The service callback can
+        // update selectedProxyId independently of DataStore.selectedProxy, so
+        // checking DataStore here can turn a visible Disconnect action into a reload.
+        if (serviceState.canStop && selectedProxyId == profile.id) {
+            disconnectProxy()
             return
         }
         selectProfile(profile)
@@ -207,228 +234,407 @@ fun NekoBoxTabScreen(modifier: Modifier = Modifier) {
         }
     }
 
-    fun addEndpoint() {
-        val parsed = runCatching { parseSocksEndpoint(endpointText) }
-        val endpoint = parsed.getOrElse {
-            message = it.message ?: "Enter server:port:username:password."
+    fun dismissAddDialog() {
+        if (isSaving) return
+        showAddDialog = false
+        dialogError = null
+    }
+
+    fun saveProxy() {
+        if (isSaving) return
+        val name = proxyName.trim()
+        if (name.isBlank()) {
+            dialogError = "Enter a name for this proxy."
+            return
+        }
+        val endpoint = runCatching { parseProxyAddress(proxyAddress) }.getOrElse {
+            dialogError = it.message ?: "Enter a valid proxy address."
             return
         }
         if (selectedGroupId <= 0L) {
-            message = "No profile group is available yet."
+            dialogError = "No profile group is available yet."
             return
         }
+
+        val bean = SOCKSBean().apply {
+            serverAddress = endpoint.host
+            serverPort = endpoint.port
+            username = endpoint.username
+            password = endpoint.password
+            protocol = SOCKSBean.PROTOCOL_SOCKS5
+            this.name = name
+        }
         isSaving = true
-        message = null
+        dialogError = null
         scope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
-                    ProfileManager.createProfile(
-                        selectedGroupId,
-                        SOCKSBean().apply {
-                            serverAddress = endpoint.server
-                            serverPort = endpoint.port
-                            username = endpoint.username
-                            password = endpoint.password
-                            protocol = SOCKSBean.PROTOCOL_SOCKS5
-                        }
-                    )
+                    ProfileManager.createProfile(selectedGroupId, bean)
                 }
             }.onSuccess {
-                endpointText = ""
-                message = "SOCKS5 profile added."
+                proxyName = ""
+                proxyAddress = ""
+                showAddDialog = false
+                message = "Proxy profile added."
             }.onFailure {
-                message = it.message ?: "Could not add this profile."
+                dialogError = it.message ?: "Could not add this profile."
             }
             isSaving = false
         }
     }
 
+    val connectionLabel = when {
+        serviceState.connected -> "Connected"
+        serviceState.canStop -> "Connecting"
+        else -> "Disconnected"
+    }
+
     Surface(modifier = modifier, color = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxSize()) {
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
+                Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 16.dp, bottom = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(Modifier.weight(1f)) {
-                    Text("Proxies", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                    Text("Profiles", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                     Text(
-                        when {
-                            serviceState.connected -> "Connected"
-                            serviceState.canStop -> "Connecting"
-                            else -> "Disconnected"
-                        },
+                        "${profiles.size} saved · $connectionLabel",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                if (serviceState.canStop) {
-                    TextButton(onClick = { SagerNet.stopService() }) { Text("Disconnect") }
-                }
-            }
-
-            Card(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
-            ) {
-                Column(
-                    Modifier.fillMaxWidth().padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Text("Quick add SOCKS5", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    OutlinedTextField(
-                        value = endpointText,
-                        onValueChange = {
-                            endpointText = it
-                            message = null
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("Server · port · username · password") },
-                        placeholder = { Text("proxy.example.com:1080:user:pass") }
-                    )
+                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer) {
                     Text(
-                        "Enter server:port:username:password. Use brackets for IPv6 hosts.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        "${profiles.size}",
+                        Modifier.padding(horizontal = 13.dp, vertical = 7.dp),
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
                     )
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (isSaving) CircularProgressIndicator(strokeWidth = 2.dp)
-                        Button(onClick = ::addEndpoint, enabled = endpointText.isNotBlank() && !isSaving) {
-                            Text("Add profile")
+                }
+                if (groups.size > 1) {
+                    Box {
+                        TextButton(onClick = { groupMenuExpanded = true }) { Text("Group") }
+                        DropdownMenu(
+                            expanded = groupMenuExpanded,
+                            onDismissRequest = { groupMenuExpanded = false }
+                        ) {
+                            groups.forEach { group ->
+                                DropdownMenuItem(
+                                    text = { Text(group.proxyTabName()) },
+                                    onClick = {
+                                        selectedGroupId = group.id
+                                        DataStore.selectedGroup = group.id
+                                        groupMenuExpanded = false
+                                    }
+                                )
+                            }
                         }
                     }
-                    message?.let {
-                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (serviceState.canStop) {
+                    TextButton(onClick = ::disconnectProxy) { Text("Disconnect") }
+                }
+            }
+
+            message?.let { statusMessage ->
+                Surface(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 14.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            statusMessage,
+                            Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        TextButton(onClick = { message = null }) { Text("Dismiss") }
                     }
                 }
             }
 
-            if (groups.isNotEmpty()) {
-                val selectedGroupIndex = groups.indexOfFirst { it.id == selectedGroupId }.coerceAtLeast(0)
-                ScrollableTabRow(selectedTabIndex = selectedGroupIndex, edgePadding = 16.dp) {
-                    groups.forEachIndexed { index, group ->
-                        Tab(
-                            selected = index == selectedGroupIndex,
-                            onClick = {
-                                selectedGroupId = group.id
-                                DataStore.selectedGroup = group.id
-                            },
-                            text = {
-                                Text(group.displayName(), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Box(Modifier.fillMaxWidth().weight(1f)) {
+                when {
+                    isLoading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                    profiles.isEmpty() -> Column(
+                        Modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Surface(
+                            modifier = Modifier.size(64.dp),
+                            shape = RoundedCornerShape(22.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text("↗", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
                             }
+                        }
+                        Spacer(Modifier.height(16.dp))
+                        Text("No profiles yet", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "Add a named SOCKS5 or HTTP proxy to get started.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                }
-            }
-
-            Row(
-                Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("Profiles", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Text("${profiles.size}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-
-            when {
-                isLoading -> CircularProgressIndicator(Modifier.align(Alignment.CenterHorizontally).padding(20.dp))
-                profiles.isEmpty() -> Column(
-                    Modifier.fillMaxWidth().weight(1f).padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Text("No profiles in this group", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        "Add a SOCKS5 endpoint above to get started.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                else -> LazyColumn(
-                    modifier = Modifier.fillMaxWidth().weight(1f),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    items(profiles, key = { it.id }) { profile ->
-                        val isSelected = selectedProxyId == profile.id
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(18.dp),
-                            colors = CardDefaults.cardColors(
-                                containerColor = if (isSelected) MaterialTheme.colorScheme.secondaryContainer
-                                else MaterialTheme.colorScheme.surfaceContainerLow
-                            )
-                        ) {
-                            Column(
-                                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                    else -> LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 92.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        items(profiles, key = { it.id }) { profile ->
+                            val isSelected = selectedProxyId == profile.id
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(22.dp),
+                                border = BorderStroke(
+                                    if (isSelected) 1.5.dp else 1.dp,
+                                    if (isSelected) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.outlineVariant
+                                ),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (isSelected) MaterialTheme.colorScheme.secondaryContainer
+                                    else MaterialTheme.colorScheme.surfaceContainerLow
+                                )
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(profile.displayName(), fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        Text(
-                                            "${profile.displayType()} · ${profile.displayAddress()}",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
+                                Column(
+                                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 15.dp),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Surface(
+                                            modifier = Modifier.size(46.dp),
+                                            shape = RoundedCornerShape(15.dp),
+                                            color = if (isSelected) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.surfaceContainerHigh
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                val typeLabel = profile.displayType().uppercase()
+                                                Text(
+                                                    if (typeLabel.contains("SOCKS")) "S5" else typeLabel.take(2),
+                                                    style = MaterialTheme.typography.labelLarge,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimary
+                                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        }
+                                        Spacer(Modifier.width(12.dp))
+                                        Column(Modifier.weight(1f)) {
+                                            Text(
+                                                profile.displayName(),
+                                                style = MaterialTheme.typography.titleMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Spacer(Modifier.height(3.dp))
+                                            Text(
+                                                "${profile.displayType()} · ${profile.displayAddress()}",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        if (isSelected) {
+                                            Surface(
+                                                shape = CircleShape,
+                                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                                            ) {
+                                                Text(
+                                                    "Selected",
+                                                    Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                        }
                                     }
-                                    TextButton(
-                                        onClick = { selectProfile(profile) },
-                                        enabled = !isSelected
-                                    ) { Text(if (isSelected) "Selected" else "Select") }
-                                }
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                                    Button(onClick = { connectProfile(profile) }) {
-                                        Text(
-                                            if (serviceState.canStop && isSelected) "Disconnect"
-                                            else if (serviceState.canStop) "Switch to profile"
-                                            else "Connect"
-                                        )
+                                    Row(
+                                        Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        TextButton(
+                                            onClick = { selectProfile(profile) },
+                                            enabled = !isSelected
+                                        ) {
+                                            Text(if (isSelected) "Current profile" else "Select")
+                                        }
+                                        Spacer(Modifier.weight(1f))
+                                        Button(onClick = { connectProfile(profile) }) {
+                                            Text(
+                                                if (serviceState.canStop && isSelected) "Disconnect"
+                                                else if (serviceState.canStop) "Switch"
+                                                else "Connect"
+                                            )
+                                        }
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+
+                FloatingActionButton(
+                    onClick = {
+                        dialogError = null
+                        showAddDialog = true
+                    },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 20.dp, bottom = 18.dp)
+                        .semantics { contentDescription = "Add proxy" }
+                ) {
+                    Text("+", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Normal)
+                }
+            }
+
+            val tabGroups = groups.filterNot { it.isDefaultProxyGroup() }
+            if (tabGroups.isNotEmpty()) {
+                val selectedGroupIndex = tabGroups.indexOfFirst { it.id == selectedGroupId }
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    tonalElevation = 2.dp
+                ) {
+                    ScrollableTabRow(
+                        selectedTabIndex = selectedGroupIndex.coerceAtLeast(0),
+                        edgePadding = 12.dp,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        indicator = {}
+                    ) {
+                        tabGroups.forEachIndexed { index, group ->
+                            Tab(
+                                selected = index == selectedGroupIndex,
+                                onClick = {
+                                    selectedGroupId = group.id
+                                    DataStore.selectedGroup = group.id
+                                },
+                                text = {
+                                    Text(
+                                        group.proxyTabName(),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            )
                         }
                     }
                 }
             }
         }
     }
+
+    if (showAddDialog) {
+        AlertDialog(
+            onDismissRequest = ::dismissAddDialog,
+            title = { Text("Add proxy") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        value = proxyName,
+                        onValueChange = {
+                            proxyName = it
+                            dialogError = null
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Name") },
+                        placeholder = { Text("Work proxy") },
+                        enabled = !isSaving
+                    )
+                    OutlinedTextField(
+                        value = proxyAddress,
+                        onValueChange = {
+                            proxyAddress = it
+                            dialogError = null
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        isError = dialogError != null,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                        label = { Text("Proxy address") },
+                        placeholder = { Text("host:port:username:password") },
+                        enabled = !isSaving
+                    )
+                    Text(
+                        "Use host:port:username:password. Wrap IPv6 hosts in brackets.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    dialogError?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = ::saveProxy,
+                    enabled = proxyName.isNotBlank() && proxyAddress.isNotBlank() && !isSaving
+                ) {
+                    if (isSaving) {
+                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text("Add proxy")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = ::dismissAddDialog, enabled = !isSaving) { Text("Cancel") }
+            }
+        )
+    }
 }
 
-private fun parseSocksEndpoint(input: String): SocksEndpoint {
-    val value = input.trim()
-    require(value.isNotEmpty()) { "Enter server:port:username:password." }
+private fun ProxyGroup.proxyTabName(): String {
+    val label = displayName()
+    return if (ungrouped || label.equals("Ungrouped", ignoreCase = true)) "Default" else label
+}
 
-    val server: String
-    val credentials: List<String>
+private fun ProxyGroup.isDefaultProxyGroup(): Boolean {
+    val label = displayName()
+    return ungrouped || label.equals("Ungrouped", ignoreCase = true) ||
+        label.equals("Default", ignoreCase = true)
+}
+
+private fun parseProxyAddress(input: String): ProxyEndpoint {
+    val value = input.trim()
+    require(value.isNotEmpty()) { "Enter host:port:username:password." }
+
+    val host: String
+    val parts: List<String>
     if (value.startsWith("[")) {
         val closingBracket = value.indexOf(']')
         require(closingBracket > 1 && value.getOrNull(closingBracket + 1) == ':') {
             "For IPv6, use [address]:port:username:password."
         }
-        server = value.substring(1, closingBracket)
-        credentials = value.substring(closingBracket + 2).split(':', limit = 3)
+        host = value.substring(1, closingBracket)
+        parts = value.substring(closingBracket + 2).split(':', limit = 3)
     } else {
-        val parts = value.split(':', limit = 4)
-        require(parts.size == 4) { "Use server:port:username:password." }
-        server = parts[0].trim()
-        credentials = parts.drop(1)
+        val fields = value.split(':', limit = 4)
+        require(fields.size == 4) { "Use host:port:username:password." }
+        host = fields[0].trim()
+        parts = fields.drop(1)
     }
 
-    require(server.isNotBlank()) { "Server is required." }
-    require(credentials.size == 3) { "Use server:port:username:password." }
-    val port = credentials[0].trim().toIntOrNull()
+    require(host.isNotBlank()) { "Proxy host is required." }
+    require(parts.size == 3) { "Use host:port:username:password." }
+    val port = parts[0].trim().toIntOrNull()
         ?: throw IllegalArgumentException("Port must be between 1 and 65535.")
     require(port in 1..65535) { "Port must be between 1 and 65535." }
-    val username = credentials[1].trim()
-    val password = credentials[2]
+    val username = parts[1].trim()
+    val password = parts[2]
     require(username.isNotBlank()) { "Username is required." }
     require(password.isNotBlank()) { "Password is required." }
-    return SocksEndpoint(server, port, username, password)
+    return ProxyEndpoint(host, port, username, password)
 }

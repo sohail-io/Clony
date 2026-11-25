@@ -1,20 +1,16 @@
 package com.clony
 
-import android.content.Context
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import top.niunaijun.blackbox.core.network.CloneProxyStore
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.UUID
 
-/** Looks up the public IPv4 address for a clone using that clone's saved network route. */
+/** Looks up the phone's public IPv4 through its default, unproxied network route. */
 internal object ClonePublicIpv4Lookup {
     private const val IPV4_ENDPOINT = "https://api4.ipify.org"
     private const val NETWORK_TIMEOUT_MS = 8_000
 
-    /** Looks up the phone's public IPv4 through its default, unproxied network route. */
     suspend fun fetchPhonePublicIpv4(): String? = withContext(Dispatchers.IO) {
         try {
             fetchWithoutProxy()
@@ -22,28 +18,6 @@ internal object ClonePublicIpv4Lookup {
             throw error
         } catch (_: Exception) {
             null
-        }
-    }
-
-    suspend fun fetch(context: Context, app: AppTile): String? {
-        val userId = app.virtualUserId ?: return null
-        return withContext(Dispatchers.IO) {
-            try {
-                val appContext = context.applicationContext
-                val proxy = CloneProxyStore.read(appContext, app.packageName, userId)
-                when (proxy.type) {
-                    0 -> fetchWithoutProxy()
-                    1, 2 -> ProxyRegionResolver.detectPublicIpv4(
-                        proxy,
-                        UUID.randomUUID().toString().take(8)
-                    )
-                    else -> null
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Exception) {
-                null
-            }
         }
     }
 

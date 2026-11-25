@@ -27,8 +27,6 @@ internal object ProxyRegionResolver {
     private const val TAG = "ClonyProxyRegion"
     private const val GEO_HOST = "ipwho.is"
     private const val GEO_PORT = 443
-    private const val IPV4_HOST = "api4.ipify.org"
-    private const val IPV4_PORT = 443
     private const val CONNECT_TIMEOUT_MS = 5_000
     private const val READ_TIMEOUT_MS = 5_000
     private const val MAX_HEADER_BYTES = 8 * 1024
@@ -62,42 +60,6 @@ internal object ProxyRegionResolver {
             throw IOException(
                 detail?.let { "Could not detect the proxy's exit country or GPS location: $it" }
                     ?: "Could not detect the proxy's exit country or GPS location. Check the proxy connection and try again.",
-                error
-            )
-        } finally {
-            runCatching { proxySocket.close() }
-        }
-    }
-
-    /** Looks up the public IPv4 address seen through this clone's configured proxy. */
-    @Throws(IOException::class)
-    fun detectPublicIpv4(config: CloneProxyConfig, traceId: String): String {
-        if (config.type != 1 && config.type != 2) {
-            throw IOException("Choose a SOCKS5 or HTTP proxy before looking up its public IPv4 address.")
-        }
-
-        val started = SystemClock.elapsedRealtime()
-        Log.i(TAG, "event=ipv4_detect_begin trace_id=$traceId proxy_type=${config.type}")
-        val proxySocket = Socket()
-        try {
-            val endpoint = config.resolvedHost.ifEmpty { config.host }
-            traceStage(traceId, "ipv4_proxy_endpoint_connect") {
-                proxySocket.connect(InetSocketAddress(endpoint, config.port), CONNECT_TIMEOUT_MS)
-                proxySocket.soTimeout = READ_TIMEOUT_MS
-            }
-            when (config.type) {
-                1 -> connectSocks5(proxySocket, config, traceId, IPV4_HOST, IPV4_PORT)
-                2 -> connectHttp(proxySocket, config, traceId, IPV4_HOST, IPV4_PORT)
-            }
-            val address = requestPublicIpv4(proxySocket, traceId)
-            Log.i(TAG, "event=ipv4_detect_complete trace_id=$traceId result=success elapsed_ms=${SystemClock.elapsedRealtime() - started}")
-            return address
-        } catch (error: IOException) {
-            Log.w(TAG, "event=ipv4_detect_complete trace_id=$traceId result=failure error_type=${error.javaClass.simpleName} elapsed_ms=${SystemClock.elapsedRealtime() - started}")
-            val detail = error.message?.takeIf(String::isNotBlank)
-            throw IOException(
-                detail?.let { "Could not detect the proxy's public IPv4 address: $it" }
-                    ?: "Could not detect the proxy's public IPv4 address. Check the proxy connection and try again.",
                 error
             )
         } finally {
@@ -142,7 +104,14 @@ internal object ProxyRegionResolver {
                 output.write(password.size.toByte().toInt())
                 output.write(password)
                 output.flush()
-                readExact(input, 2)
+                try {
+                    readExact(input, 2)
+                } catch (error: IOException) {
+                    throw IOException(
+                        "SOCKS5 proxy closed during authentication. Check the username and password.",
+                        error
+                    )
+                }
             }
             if ((authReply[0].toInt() and 0xff) != 1 || authReply[1].toInt() != 0) {
                 throw IOException("SOCKS5 credentials were rejected.")
@@ -209,42 +178,6 @@ internal object ProxyRegionResolver {
                 if (line.isEmpty()) break
             }
             if (status !in 200..299) throw IOException("HTTP proxy refused the HTTPS tunnel.")
-        }
-    }
-
-    private fun requestPublicIpv4(tunnel: Socket, traceId: String): String {
-        val tls = (SSLSocketFactory.getDefault() as SSLSocketFactory)
-            .createSocket(tunnel, IPV4_HOST, IPV4_PORT, true) as SSLSocket
-        tls.soTimeout = READ_TIMEOUT_MS
-        val parameters = tls.sslParameters
-        parameters.endpointIdentificationAlgorithm = "HTTPS"
-        tls.sslParameters = parameters
-        traceStage(traceId, "ipv4_tls_handshake") { tls.startHandshake() }
-
-        tls.use { secureSocket ->
-            val request = "GET / HTTP/1.1\r\n" +
-                "Host: $IPV4_HOST\r\n" +
-                "User-Agent: Clony/1.0\r\n" +
-                "Accept: text/plain\r\n" +
-                "Accept-Encoding: identity\r\n" +
-                "Connection: close\r\n\r\n"
-            val response = traceStage(traceId, "ipv4_http_request_response") {
-                secureSocket.outputStream.write(request.toByteArray(StandardCharsets.US_ASCII))
-                secureSocket.outputStream.flush()
-                readHttpResponse(secureSocket.inputStream)
-            }
-            if (response.status !in 200..299) throw IOException("IPv4 lookup returned HTTP ${response.status}.")
-            val address = String(response.body, StandardCharsets.UTF_8).trim()
-            if (!isIpv4Address(address)) throw IOException("IPv4 lookup returned an invalid address.")
-            return address
-        }
-    }
-
-    private fun isIpv4Address(value: String): Boolean {
-        val parts = value.split('.')
-        return parts.size == 4 && parts.all { part ->
-            part.isNotEmpty() && part.all { it in '0'..'9' } &&
-                (part.toIntOrNull() ?: -1) in 0..255
         }
     }
 

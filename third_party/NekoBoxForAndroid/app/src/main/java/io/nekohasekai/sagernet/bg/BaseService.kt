@@ -78,6 +78,8 @@ class BaseService {
         }
         var closeReceiverRegistered = false
 
+        fun stop() = service.stopRunner()
+
         val binder = Binder(this)
         var connectingJob: Job? = null
 
@@ -103,6 +105,13 @@ class BaseService {
 
         override fun getState(): Int = (data?.state ?: State.Idle).ordinal
         override fun getProfileName(): String = data?.proxy?.displayProfileName ?: "Idle"
+
+        override fun stop(): Boolean {
+            val currentData = data ?: return false
+            if (!currentData.state.canStop) return false
+            currentData.stop()
+            return true
+        }
 
         override fun registerCallback(cb: ISagerNetServiceCallback, id: Int) {
             if (id == SagerConnection.CONNECTION_ID_RESTART_BG) {

@@ -39,7 +39,7 @@ import kotlinx.coroutines.sync.withLock
  */
 class ServiceNotification(
     private val service: BaseService.Interface, title: String,
-    channel: String, visible: Boolean = false,
+    channel: String, visible: Boolean = false, private val showActions: Boolean = true,
 ) : BroadcastReceiver() {
     companion object {
         const val notificationId = 1
@@ -152,6 +152,7 @@ class ServiceNotification(
         service as Context
         useBuilder {
             it.clearActions()
+            if (!showActions) return@useBuilder
 
             val closeAction = NotificationCompat.Action.Builder(
                 0, service.getText(R.string.stop), PendingIntent.getBroadcast(
