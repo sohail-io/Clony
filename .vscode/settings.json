@@ -1,0 +1,6 @@
+{
+  "git.repositoryScanIgnoredFolders": [
+    "libneko",
+    "sing-box"
+  ]
+}
