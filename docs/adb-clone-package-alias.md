@@ -39,3 +39,30 @@ adb shell monkey -p com.zhiliaoapp.musically.clone2 1
 The alias must exactly match the package name saved for that clone in Clony.
 If the alias changes, rebuild and install the launcher for the new name. Remove
 an obsolete launcher alias with `adb uninstall <old-alias>`.
+
+## GenFarm clone IDs
+
+Automation can also launch Clony's exported bridge activity directly. Pass
+`package_name` as the guest app's original package and `clone_user_id` as either
+the legacy numeric virtual user ID or a readable copy label such as `TikTok 1`:
+
+```sh
+adb shell am start -n com.clony/.AutomationLaunchActivity \
+  --es package_name com.zhiliaoapp.musically \
+  --es clone_user_id "TikTok 1"
+```
+
+For compatibility, GenFarm configurations that still send an integer continue
+to select that exact virtual user:
+
+```sh
+adb shell am start -n com.clony/.AutomationLaunchActivity \
+  --es package_name com.zhiliaoapp.musically \
+  --ei clone_user_id 1
+```
+
+The readable form must match the app's displayed label and copy number. Clony
+resolves it to the saved per-app copy assignment, then passes the numeric ID to
+BlackBox. GenFarm must send `clone_user_id` as a string extra for the readable
+form; Clony does not parse the whole JSON document or use `host_package` and
+`wait_seconds` itself.

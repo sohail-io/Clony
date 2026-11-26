@@ -188,12 +188,14 @@ static jint readNativeInt(JNIEnv *env, jclass, jlong address) {
     return *reinterpret_cast<jint *>(address);
 }
 
-// Only the listed Binder caches and Activity's read-only FragmentController
-// are exposed. JNI field resolution occurs on a new
-// attached thread, where ART does not attribute a filtered lookup to an app
-// Java stack. This is still a normal checked JNI lookup: missing/blocked fields
+// Only the listed Binder service caches (permission, vibrator, role, locale, and connectivity) and
+// Activity's read-only FragmentController are exposed. JNI field resolution occurs
+// on a new attached thread, where ART does not attribute a filtered lookup to an
+// app Java stack. This is still a normal checked JNI lookup: missing/blocked fields
 // return failure; no ART offsets or raw object memory are inspected or modified.
-enum class FrameworkServiceKind { Permission, Vibrator, Fragments };
+enum class FrameworkServiceKind {
+    Permission, Vibrator, RoleManager, LocaleManager, ConnectivityManager, Fragments
+};
 
 struct FrameworkServiceAccess {
     JavaVM *vm;
@@ -221,6 +223,24 @@ static void accessFrameworkService(JNIEnv *env, FrameworkServiceAccess *request)
             ownerName = "android/os/SystemVibratorManager";
             interfaceName = "android/os/IVibratorManagerService";
             signature = "Landroid/os/IVibratorManagerService;";
+            fieldName = "mService";
+            break;
+        case FrameworkServiceKind::RoleManager:
+            ownerName = "android/app/role/RoleManager";
+            interfaceName = "android/app/role/IRoleManager";
+            signature = "Landroid/app/role/IRoleManager;";
+            fieldName = "mService";
+            break;
+        case FrameworkServiceKind::LocaleManager:
+            ownerName = "android/app/LocaleManager";
+            interfaceName = "android/app/ILocaleManager";
+            signature = "Landroid/app/ILocaleManager;";
+            fieldName = "mService";
+            break;
+        case FrameworkServiceKind::ConnectivityManager:
+            ownerName = "android/net/ConnectivityManager";
+            interfaceName = "android/net/IConnectivityManager";
+            signature = "Landroid/net/IConnectivityManager;";
             fieldName = "mService";
             break;
         case FrameworkServiceKind::Fragments:
@@ -295,11 +315,22 @@ static jobject frameworkServiceAccess(JNIEnv *env, jobject manager, jstring inte
     if (name == nullptr) return nullptr;
     const bool permission = std::strcmp(name, "android.permission.IPermissionManager") == 0;
     const bool vibrator = std::strcmp(name, "android.os.IVibratorManagerService") == 0;
+    const bool roleManager = std::strcmp(name, "android.app.role.IRoleManager") == 0;
+    const bool localeManager = std::strcmp(name, "android.app.ILocaleManager") == 0;
+    const bool connectivityManager = std::strcmp(name, "android.net.IConnectivityManager") == 0;
     const bool fragments = std::strcmp(name, "android.app.FragmentController") == 0;
     env->ReleaseStringUTFChars(interfaceName, name);
-    if ((!permission && !vibrator && !fragments) || (fragments && write)) return nullptr;
+    if ((!permission && !vibrator && !roleManager && !localeManager
+            && !connectivityManager && !fragments)
+            || (fragments && write)) {
+        return nullptr;
+    }
     const FrameworkServiceKind kind = permission ? FrameworkServiceKind::Permission
-            : vibrator ? FrameworkServiceKind::Vibrator : FrameworkServiceKind::Fragments;
+            : vibrator ? FrameworkServiceKind::Vibrator
+            : roleManager ? FrameworkServiceKind::RoleManager
+            : localeManager ? FrameworkServiceKind::LocaleManager
+            : connectivityManager ? FrameworkServiceKind::ConnectivityManager
+            : FrameworkServiceKind::Fragments;
 
     // The build disables C++ exceptions. pthread reports creation failure as an
     // error code, unlike std::thread's throwing constructor in this configuration.

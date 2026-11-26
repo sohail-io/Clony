@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REORDER_TASKS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Cloned Chrome queries BiometricManager under Clony's real host UID. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <!-- Virtual apps use Clony's Linux UID for hardware and shared media access. -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />

@@ -54,8 +54,12 @@ public class ActivityStack {
     private final ActivityManager mAms;
     private final Map<Integer, TaskRecord> mTasks = new LinkedHashMap<>();
     private final Set<ActivityRecord> mLaunchingActivities = new HashSet<>();
+    private final Set<Integer> mChromeFirstRunRecoveryUsers = new HashSet<>();
     // Retain the target while Android resolves the proxy task and process configuration.
     private final Map<IBinder, Intent> mActivityIntents = new ConcurrentHashMap<>();
+
+    private static final String CHROME_PACKAGE = "com.android.chrome";
+    private static final long CHROME_FIRST_RUN_RECOVERY_DELAY_MS = 500L;
 
     public static final int LAUNCH_TIME_OUT = 0;
     private final Handler mHandler = new Handler(Looper.getMainLooper()) {
@@ -819,6 +823,7 @@ public class ActivityStack {
     }
 
     public void onFinishActivity(int userId, IBinder token) {
+        ActivityRecord finishedActivity = null;
         synchronized (mTasks) {
             synchronizeTasks();
             ActivityRecord activityRecord = findActivityRecordByToken(userId, token);
@@ -827,6 +832,113 @@ public class ActivityStack {
             }
             activityRecord.finished = true;
             Log.d(TAG, "onFinishActivity : " + activityRecord.component.toString());
+            finishedActivity = activityRecord;
+        }
+        if (isChromeFirstRunActivity(finishedActivity)) {
+            recoverChromeAfterFirstRun(userId);
+        }
+    }
+
+    private boolean isChromeFirstRunActivity(ActivityRecord activity) {
+        if (activity == null || activity.component == null || activity.info == null
+                || !CHROME_PACKAGE.equals(activity.info.packageName)) {
+            return false;
+        }
+        return activity.component.getClassName().toLowerCase(java.util.Locale.ROOT).contains("firstrun");
+    }
+
+    /**
+     * Chrome may finish its first-run screen after storing the user's choice without
+     * creating the browser activity that should follow it. If the virtual task is
+     * left empty, opening Chrome again creates the home screen correctly. Perform
+     * that same recovery automatically, while allowing account/setup activities
+     * launched outside the clone to stay in front.
+     */
+    private void recoverChromeAfterFirstRun(int userId) {
+        synchronized (mTasks) {
+            if (hasLiveOtherActivityLocked(userId)) {
+                return;
+            }
+        }
+        synchronized (mChromeFirstRunRecoveryUsers) {
+            if (!mChromeFirstRunRecoveryUsers.add(userId)) {
+                return;
+            }
+        }
+
+        mHandler.postDelayed(() -> {
+            try {
+                synchronized (mTasks) {
+                    synchronizeTasks();
+                    if (hasLiveOtherActivityLocked(userId)) {
+                        Log.i(TAG, "Chrome first-run recovery skipped; another virtual activity is active userId=" + userId);
+                        return;
+                    }
+                    if (!isHostOrHomeTaskForeground()) {
+                        Log.i(TAG, "Chrome first-run recovery skipped; external activity is foreground userId=" + userId);
+                        return;
+                    }
+
+                    Intent launchIntent = BlackBoxCore.getBPackageManager()
+                            .getLaunchIntentForPackage(CHROME_PACKAGE, userId);
+                    if (launchIntent == null) {
+                        Log.w(TAG, "Chrome first-run recovery unavailable; launch intent missing userId=" + userId);
+                        return;
+                    }
+                    Log.i(TAG, "Chrome first-run ended without a browser activity; reopening Chrome userId=" + userId);
+                    startActivityLocked(userId, launchIntent, null, null, null, -1, 0, null);
+                }
+            } catch (Throwable error) {
+                Log.w(TAG, "Chrome first-run recovery failed userId=" + userId, error);
+            } finally {
+                synchronized (mChromeFirstRunRecoveryUsers) {
+                    mChromeFirstRunRecoveryUsers.remove(userId);
+                }
+            }
+        }, CHROME_FIRST_RUN_RECOVERY_DELAY_MS);
+    }
+
+    private boolean hasLiveOtherActivityLocked(int userId) {
+        synchronized (mLaunchingActivities) {
+            for (ActivityRecord activity : mLaunchingActivities) {
+                if (!activity.finished && activity.userId == userId && activity.info != null
+                        && !CHROME_PACKAGE.equals(activity.info.packageName)) {
+                    return true;
+                }
+            }
+        }
+        for (TaskRecord task : mTasks.values()) {
+            if (task.userId != userId) continue;
+            synchronized (task.activities) {
+                for (ActivityRecord activity : task.activities) {
+                    if (!activity.finished && activity.info != null
+                            && !CHROME_PACKAGE.equals(activity.info.packageName)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean isHostOrHomeTaskForeground() {
+        try {
+            List<ActivityManager.RunningTaskInfo> runningTasks = mAms.getRunningTasks(1);
+            if (runningTasks == null || runningTasks.isEmpty()) {
+                return true;
+            }
+            ComponentName topActivity = runningTasks.get(0).topActivity;
+            if (topActivity == null || BlackBoxCore.getHostPkg().equals(topActivity.getPackageName())) {
+                return true;
+            }
+            Intent homeIntent = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
+            android.content.pm.ResolveInfo home = BlackBoxCore.getContext().getPackageManager()
+                    .resolveActivity(homeIntent, 0);
+            return home == null || home.activityInfo == null
+                    || topActivity.getPackageName().equals(home.activityInfo.packageName);
+        } catch (Throwable error) {
+            Log.w(TAG, "Could not verify foreground task for Chrome first-run recovery", error);
+            return true;
         }
     }
 

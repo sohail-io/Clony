@@ -77,6 +77,20 @@ internal object CloneCopyNameStore {
     }
 
     @Synchronized
+    fun resolveUserId(context: Context, sourcePackageName: String, copyNumber: Int): Int? {
+        if (sourcePackageName.isBlank() || copyNumber < 1) return null
+        val assignments = JSONObject(preferences(context).getString(ASSIGNMENTS, "{}")!!)
+        val prefix = "$sourcePackageName:"
+        val keys = assignments.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            if (!key.startsWith(prefix) || assignments.optInt(key, 0) != copyNumber) continue
+            key.substring(prefix.length).toIntOrNull()?.takeIf { it > 0 }?.let { return it }
+        }
+        return null
+    }
+
+    @Synchronized
     fun remove(context: Context, sourcePackageName: String, userId: Int): Boolean {
         val prefs = preferences(context)
         val assignments = JSONObject(prefs.getString(ASSIGNMENTS, "{}")!!)

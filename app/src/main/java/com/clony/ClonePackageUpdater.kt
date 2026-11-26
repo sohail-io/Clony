@@ -120,10 +120,18 @@ internal object ClonePackageUpdater {
             context.getSystemService(LauncherApps::class.java)
                 .getActivityList(packageName, Process.myUserHandle())
                 .isNotEmpty()
+        }.onFailure { error ->
+            Log.w(TAG, "launch validation could not query host launcher package=" + packageName, error)
         }.getOrDefault(false)
-        return hasHostLauncherActivity && runCatching {
+        val isInstalledInClone = runCatching {
             BlackBoxCore.get().isInstalled(packageName, userId)
+        }.onFailure { error ->
+            Log.w(TAG, "launch validation could not query virtual install package=" + packageName +
+                " userId=" + userId, error)
         }.getOrDefault(false)
+        Log.i(TAG, "launch validation package=" + packageName + " userId=" + userId +
+            " hostLauncher=" + hasHostLauncherActivity + " virtualInstalled=" + isInstalledInClone)
+        return hasHostLauncherActivity && isInstalledInClone
     }
 
     suspend fun updateIfNeeded(context: Context, packageName: String): ClonePackageUpdateOutcome =

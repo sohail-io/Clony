@@ -316,10 +316,18 @@ internal object CloneShortcutMigration {
                 userId,
                 ClonePackageNameStore.read(context, packageName, userId)
             )
-            val shortcutLabel = sourceLabel
-                ?: shortcut.longLabel?.toString()?.takeIf(String::isNotBlank)
+            val previousLabel = shortcut.longLabel?.toString()?.takeIf(String::isNotBlank)
                 ?: shortcut.shortLabel?.toString()?.takeIf(String::isNotBlank)
                 ?: packageName
+            // When the source app label can't be read, the shortcut label is the only
+            // available name. It already includes this copy number, so remove repeated
+            // trailing copies before rebuilding the migrated label. This also repairs labels
+            // written by earlier migrations, such as "TikTok 1 1".
+            val fallbackLabel = previousLabel
+                .replace(Regex("(?:\\s+$copyNumber)+${'$'}"), "")
+                .takeIf(String::isNotBlank)
+                ?: previousLabel
+            val shortcutLabel = sourceLabel ?: fallbackLabel
             val copyShortcutLabel = "$shortcutLabel $copyNumber"
             val builder = ShortcutInfoCompat.Builder(context, shortcut.id)
                 .setShortLabel(copyShortcutLabel.take(25))

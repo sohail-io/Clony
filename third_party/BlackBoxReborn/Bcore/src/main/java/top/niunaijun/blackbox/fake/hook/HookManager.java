@@ -1,6 +1,7 @@
 package top.niunaijun.blackbox.fake.hook;
 
 import android.util.Log;
+import android.os.Build;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -70,6 +71,7 @@ import top.niunaijun.blackbox.fake.service.IPersistentDataBlockServiceProxy;
 import top.niunaijun.blackbox.fake.service.IPhoneSubInfoProxy;
 import top.niunaijun.blackbox.fake.service.IPowerManagerProxy;
 import top.niunaijun.blackbox.fake.service.IRoleManagerProxy;
+import top.niunaijun.blackbox.fake.service.ILocaleManagerProxy;
 import top.niunaijun.blackbox.fake.service.ApkAssetsProxy;
 import top.niunaijun.blackbox.fake.service.ResourcesManagerProxy;
 import top.niunaijun.blackbox.fake.service.IShortcutManagerProxy;
@@ -122,6 +124,9 @@ public class HookManager {
             addInjector(new IWindowManagerProxy());
             addInjector(new IUserManagerProxy());
             addInjector(new IRoleManagerProxy());
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                addInjector(new ILocaleManagerProxy());
+            }
             addInjector(new RestrictionsManagerStub());
             addInjector(new IMediaSessionManagerProxy());
             addInjector(new IAudioServiceProxy());

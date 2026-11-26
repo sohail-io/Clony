@@ -23,6 +23,7 @@ import top.niunaijun.blackbox.fake.hook.BinderInvocationStub;
 import top.niunaijun.blackbox.fake.hook.ScanClass;
 import top.niunaijun.blackbox.fake.hook.MethodHook;
 import top.niunaijun.blackbox.fake.hook.ProxyMethod;
+import top.niunaijun.blackbox.utils.FrameworkServiceCache;
 import top.niunaijun.blackbox.utils.Slog;
 import top.niunaijun.blackbox.utils.VirtualRuntimeTrace;
 
@@ -30,6 +31,8 @@ import top.niunaijun.blackbox.utils.VirtualRuntimeTrace;
 @ScanClass(VpnCommonProxy.class)
 public class IConnectivityManagerProxy extends BinderInvocationStub {
     public static final String TAG = "IConnectivityManagerProxy";
+    private static final String CONNECTIVITY_INTERFACE = "android.net.IConnectivityManager";
+    private Object mConnectivityManager;
 
     public IConnectivityManagerProxy() {
         super(BRServiceManager.get().getService(Context.CONNECTIVITY_SERVICE));
@@ -37,17 +40,48 @@ public class IConnectivityManagerProxy extends BinderInvocationStub {
 
     @Override
     protected Object getWho() {
-        return BRIConnectivityManagerStub.get().asInterface(BRServiceManager.get().getService(Context.CONNECTIVITY_SERVICE));
+        Context context = BlackBoxCore.getContext();
+        if (context != null) {
+            mConnectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (mConnectivityManager != null) {
+                try {
+                    return FrameworkServiceCache.get(mConnectivityManager, CONNECTIVITY_INTERFACE);
+                } catch (Exception error) {
+                    Slog.e(TAG, "Could not read ConnectivityManager's cached service", error);
+                }
+            }
+        }
+        return BRIConnectivityManagerStub.get().asInterface(
+                BRServiceManager.get().getService(Context.CONNECTIVITY_SERVICE));
     }
 
     @Override
     protected void inject(Object baseInvocation, Object proxyInvocation) {
         replaceSystemService(Context.CONNECTIVITY_SERVICE);
+        if (mConnectivityManager != null) {
+            try {
+                FrameworkServiceCache.set(mConnectivityManager, CONNECTIVITY_INTERFACE, proxyInvocation);
+                Slog.i(TAG, "ConnectivityManager service proxy installed in framework cache");
+            } catch (Exception error) {
+                Slog.w(TAG, "Could not update the cached ConnectivityManager instance", error);
+            }
+        }
     }
 
     @Override
     public boolean isBadEnv() {
         return false;
+    }
+
+    @Override
+    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        String virtualPackage = BActivityThread.getAppPackageName();
+        String hostPackage = BlackBoxCore.getHostPkg();
+        if (rewriteVirtualCallerPackage(args, virtualPackage, hostPackage)) {
+            Slog.d(TAG, method.getName() + " caller package rewritten from "
+                    + virtualPackage + " to " + hostPackage);
+        }
+        return super.invoke(proxy, method, args);
     }
 
     
@@ -382,18 +416,15 @@ public class IConnectivityManagerProxy extends BinderInvocationStub {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
             if (android.os.Build.VERSION.SDK_INT >= 21) {
-                Object[] forwarded = args == null ? null : args.clone();
+                Object[] forwarded = args;
                 String virtualPackage = top.niunaijun.blackbox.app.BActivityThread.getAppPackageName();
-                boolean rewritten = rewriteVirtualCallerPackage(
-                        forwarded, virtualPackage, top.niunaijun.blackbox.BlackBoxCore.getHostPkg());
                 if (virtualPackage != null) {
                     VirtualRuntimeTrace.eventOnce("network_capabilities_query", virtualPackage,
                             top.niunaijun.blackbox.app.BActivityThread.getAppProcessName(),
                             top.niunaijun.blackbox.app.BActivityThread.getUserId());
                     Slog.d(TAG, "getNetworkCapabilities route package=" + virtualPackage
                             + " user=" + top.niunaijun.blackbox.app.BActivityThread.getUserId()
-                            + " hostPackage=" + (rewritten
-                            ? top.niunaijun.blackbox.BlackBoxCore.getHostPkg() : "<not-present>"));
+                            + " hostPackage=" + top.niunaijun.blackbox.BlackBoxCore.getHostPkg());
                 }
 
                 final Object result;
@@ -584,17 +615,9 @@ public class IConnectivityManagerProxy extends BinderInvocationStub {
             if (IConnectivityManagerProxy.hideDnsServers()) {
                 return java.util.Collections.emptyList();
             }
-            try {
-                
-                java.util.List<java.net.InetAddress> dnsServers = new java.util.ArrayList<>();
-                dnsServers.add(java.net.InetAddress.getByName("8.8.8.8"));
-                dnsServers.add(java.net.InetAddress.getByName("8.8.4.4"));
-                Slog.d(TAG, "Returning system DNS servers for sandboxed app");
-                return dnsServers;
-            } catch (Exception e) {
-                Slog.w(TAG, "Error creating DNS servers list: " + e.getMessage());
-                return method.invoke(who, args);
-            }
+            // Keep the device's actual resolver configuration. Replacing it with public
+            // DNS can break networks that block external resolvers or use Private DNS.
+            return method.invoke(who, args);
         }
     }
 
