@@ -193,7 +193,7 @@ static jint readNativeInt(JNIEnv *env, jclass, jlong address) {
 // attached thread, where ART does not attribute a filtered lookup to an app
 // Java stack. This is still a normal checked JNI lookup: missing/blocked fields
 // return failure; no ART offsets or raw object memory are inspected or modified.
-enum class FrameworkServiceKind { Permission, Vibrator, Fragments };
+enum class FrameworkServiceKind { Permission, Vibrator, Fragments, Credential };
 
 struct FrameworkServiceAccess {
     JavaVM *vm;
@@ -229,6 +229,12 @@ static void accessFrameworkService(JNIEnv *env, FrameworkServiceAccess *request)
             interfaceName = "android/app/FragmentController";
             signature = "Landroid/app/FragmentController;";
             fieldName = "mFragments";
+            break;
+        case FrameworkServiceKind::Credential:
+            ownerName = "android/credentials/CredentialManager";
+            interfaceName = "android/credentials/ICredentialManager";
+            signature = "Landroid/credentials/ICredentialManager;";
+            fieldName = "mService";
             break;
         default:
             return;
@@ -296,10 +302,12 @@ static jobject frameworkServiceAccess(JNIEnv *env, jobject manager, jstring inte
     const bool permission = std::strcmp(name, "android.permission.IPermissionManager") == 0;
     const bool vibrator = std::strcmp(name, "android.os.IVibratorManagerService") == 0;
     const bool fragments = std::strcmp(name, "android.app.FragmentController") == 0;
+    const bool credential = std::strcmp(name, "android.credentials.ICredentialManager") == 0;
     env->ReleaseStringUTFChars(interfaceName, name);
-    if ((!permission && !vibrator && !fragments) || (fragments && write)) return nullptr;
+    if ((!permission && !vibrator && !fragments && !credential) || (fragments && write)) return nullptr;
     const FrameworkServiceKind kind = permission ? FrameworkServiceKind::Permission
-            : vibrator ? FrameworkServiceKind::Vibrator : FrameworkServiceKind::Fragments;
+            : vibrator ? FrameworkServiceKind::Vibrator
+            : fragments ? FrameworkServiceKind::Fragments : FrameworkServiceKind::Credential;
 
     // The build disables C++ exceptions. pthread reports creation failure as an
     // error code, unlike std::thread's throwing constructor in this configuration.

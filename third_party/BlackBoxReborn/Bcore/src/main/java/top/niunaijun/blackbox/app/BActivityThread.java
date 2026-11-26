@@ -181,6 +181,34 @@ public class BActivityThread extends IBActivityThread.Stub {
         return currentActivityThread().mInitialApplication;
     }
 
+    /**
+     * Returns the virtual package class loader even while Application is still
+     * being created. Some packages broadcast from Application.attachBaseContext,
+     * before mInitialApplication has been assigned.
+     */
+    public static ClassLoader getApplicationClassLoader() {
+        BActivityThread thread = currentActivityThread();
+        Application application = thread.mInitialApplication;
+        if (application != null) {
+            return application.getClassLoader();
+        }
+
+        AppBindData boundApplication = thread.mBoundApplication;
+        if (boundApplication != null && boundApplication.info != null) {
+            try {
+                ClassLoader classLoader = BRLoadedApk.get(boundApplication.info).getClassLoader();
+                if (classLoader != null) {
+                    return classLoader;
+                }
+            } catch (Throwable ignored) {
+                // Fall through to the host loader if virtual package setup is incomplete.
+            }
+        }
+
+        Context context = BlackBoxCore.getContext();
+        return context != null ? context.getClassLoader() : BActivityThread.class.getClassLoader();
+    }
+
     public static int getAppPid() {
         return getAppConfig() == null ? -1 : getAppConfig().bpid;
     }

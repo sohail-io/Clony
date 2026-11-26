@@ -3,14 +3,10 @@ package top.niunaijun.blackbox.fake.service;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.os.IBinder;
-import android.os.IInterface;
 
-import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.util.Collection;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import black.android.os.BRServiceManager;
 import top.niunaijun.blackbox.BlackBoxCore;
@@ -18,6 +14,7 @@ import top.niunaijun.blackbox.app.BActivityThread;
 import top.niunaijun.blackbox.fake.hook.BinderInvocationStub;
 import top.niunaijun.blackbox.fake.hook.MethodHook;
 import top.niunaijun.blackbox.fake.hook.ProxyMethod;
+import top.niunaijun.blackbox.utils.FrameworkServiceCache;
 import top.niunaijun.blackbox.utils.Slog;
 
 /**
@@ -28,6 +25,7 @@ import top.niunaijun.blackbox.utils.Slog;
 public final class ICredentialManagerProxy extends BinderInvocationStub {
     private static final String TAG = "CredentialManagerStub";
     private static final String SERVICE_NAME = "credential";
+    private static final String SERVICE_INTERFACE = "android.credentials.ICredentialManager";
     private static final String ALLOWED_PROVIDERS_PERMISSION =
             "android.permission.CREDENTIAL_MANAGER_SET_ALLOWED_PROVIDERS";
     private static final String NO_CREDENTIAL_TYPE =
@@ -40,12 +38,26 @@ public final class ICredentialManagerProxy extends BinderInvocationStub {
 
     @Override
     protected Object getWho() {
+        // Let framework code create its own hidden ICredentialManager interface. Android 17
+        // blocks both Stub.asInterface() and ordinary reflection on CredentialManager.mService;
+        // FrameworkServiceCache uses the runtime field-type lookup supported by NativeCore.
         try {
-            Class<?> stub = Class.forName("android.credentials.ICredentialManager$Stub");
-            return stub.getMethod("asInterface", IBinder.class).invoke(null,
-                    BRServiceManager.get().getService(SERVICE_NAME));
-        } catch (ReflectiveOperationException error) {
-            throw new IllegalStateException("Cannot obtain credential manager service", error);
+            Object manager = BlackBoxCore.getContext().getSystemService(SERVICE_NAME);
+            Object service = FrameworkServiceCache.get(manager, SERVICE_INTERFACE);
+            Slog.i(TAG, "CredentialManager interface acquired from framework cache: "
+                    + service.getClass().getName());
+            return service;
+        } catch (ReflectiveOperationException | RuntimeException frameworkCacheError) {
+            // Keep the older framework path for releases where the field-type cache helper is
+            // unavailable but Stub.asInterface remains part of the accessible surface.
+            try {
+                Class<?> stub = Class.forName("android.credentials.ICredentialManager$Stub");
+                return stub.getMethod("asInterface", IBinder.class).invoke(null,
+                        BRServiceManager.get().getService(SERVICE_NAME));
+            } catch (ReflectiveOperationException legacyError) {
+                legacyError.addSuppressed(frameworkCacheError);
+                throw new IllegalStateException("Cannot obtain credential manager service", legacyError);
+            }
         }
     }
 
@@ -68,30 +80,20 @@ public final class ICredentialManagerProxy extends BinderInvocationStub {
             return false;
         }
 
-        AtomicBoolean serviceReplaced = new AtomicBoolean();
-        for (Class<?> type = manager.getClass(); type != null; type = type.getSuperclass()) {
-            for (Field field : type.getDeclaredFields()) {
-                if (!IInterface.class.isAssignableFrom(field.getType())) continue;
-                if (!"mService".equals(field.getName()) && !"sService".equals(field.getName())) continue;
-                try {
-                    field.setAccessible(true);
-                    Object target = Modifier.isStatic(field.getModifiers()) ? null : manager;
-                    field.set(target, sCredentialManagerInterface);
-                    if (field.get(target) == sCredentialManagerInterface) serviceReplaced.set(true);
-                } catch (ReflectiveOperationException | RuntimeException error) {
-                    Slog.w(TAG, "Could not patch CredentialManager context cache: "
-                            + error.getClass().getSimpleName());
-                }
+        try {
+            FrameworkServiceCache.set(manager, SERVICE_INTERFACE, sCredentialManagerInterface);
+            if (FrameworkServiceCache.get(manager, SERVICE_INTERFACE) == sCredentialManagerInterface) {
+                Slog.i(TAG, "CredentialManager proxy installed for context package="
+                        + context.getPackageName() + " user=" + BActivityThread.getUserId());
+                return true;
             }
+        } catch (ReflectiveOperationException | RuntimeException error) {
+            Slog.w(TAG, "Could not patch CredentialManager context cache: "
+                    + error.getClass().getSimpleName());
         }
-        if (!serviceReplaced.get()) {
-            Slog.w(TAG, "CredentialManager context cache did not expose its binder package="
-                    + context.getPackageName());
-            return false;
-        }
-        Slog.i(TAG, "CredentialManager proxy installed for context package="
-                + context.getPackageName() + " user=" + BActivityThread.getUserId());
-        return true;
+        Slog.w(TAG, "CredentialManager context cache did not accept proxy package="
+                + context.getPackageName());
+        return false;
     }
 
     @Override
@@ -116,7 +118,32 @@ public final class ICredentialManagerProxy extends BinderInvocationStub {
                         + " user=" + BActivityThread.getUserId());
                 return null;
             }
-            return method.invoke(who, args);
+            try {
+                return method.invoke(who, args);
+            } catch (InvocationTargetException error) {
+                Throwable cause = error.getCause();
+                if (isAllowedProvidersPermissionDenied(cause)) {
+                    deliverNoCredential(args[1]);
+                    Slog.i(TAG, "CredentialManager fallback=NO_CREDENTIAL permission="
+                            + ALLOWED_PROVIDERS_PERMISSION + " package=" + packageName
+                            + " user=" + BActivityThread.getUserId());
+                    return null;
+                }
+                throw cause;
+            } catch (SecurityException error) {
+                if (!isAllowedProvidersPermissionDenied(error)) throw error;
+                deliverNoCredential(args[1]);
+                Slog.i(TAG, "CredentialManager fallback=NO_CREDENTIAL permission="
+                        + ALLOWED_PROVIDERS_PERMISSION + " package=" + packageName
+                        + " user=" + BActivityThread.getUserId());
+                return null;
+            }
+        }
+
+        private static boolean isAllowedProvidersPermissionDenied(Throwable error) {
+            return error instanceof SecurityException
+                    && error.getMessage() != null
+                    && error.getMessage().contains(ALLOWED_PROVIDERS_PERMISSION);
         }
 
         /** Returns true when a clone request was completed locally with the normal empty result. */
