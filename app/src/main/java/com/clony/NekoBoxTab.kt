@@ -28,6 +28,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ScrollableTabRow
@@ -71,6 +72,8 @@ import io.nekohasekai.sagernet.ui.VpnRequestActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import top.niunaijun.blackbox.core.network.CloneProxyConfig
+import java.util.Locale
 
 private data class ProxyEndpoint(
     val host: String,
@@ -88,6 +91,9 @@ fun NekoBoxTabScreen(modifier: Modifier = Modifier) {
     var proxyAddress by remember { mutableStateOf("") }
     var dialogError by remember { mutableStateOf<String?>(null) }
     var showAddDialog by remember { mutableStateOf(false) }
+    var profileMenuId by remember { mutableStateOf<Long?>(null) }
+    var profileToDelete by remember { mutableStateOf<ProxyEntity?>(null) }
+    var deletingProfileId by remember { mutableStateOf<Long?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var groups by remember { mutableStateOf<List<ProxyGroup>>(emptyList()) }
     var groupMenuExpanded by remember { mutableStateOf(false) }
@@ -267,17 +273,49 @@ fun NekoBoxTabScreen(modifier: Modifier = Modifier) {
         isSaving = true
         dialogError = null
         scope.launch {
-            runCatching {
+            val result = runCatching {
                 withContext(Dispatchers.IO) {
+                    val existingProfiles = SagerDatabase.proxyDao.getAll()
+                    val duplicateName = existingProfiles.any { existing ->
+                        runCatching {
+                            existing.requireBean().name?.trim()?.equals(name, ignoreCase = true) == true
+                        }.getOrDefault(false)
+                    }
+                    if (duplicateName) {
+                        error("A proxy with this name already exists.")
+                    }
+                    val normalizedHost = normalizeProxyHost(endpoint.host)
+                    val duplicateAddress = existingProfiles.any { existing ->
+                        runCatching {
+                            val existingBean = existing.requireBean()
+                            normalizeProxyHost(existingBean.serverAddress.orEmpty()) == normalizedHost &&
+                                existingBean.serverPort == endpoint.port
+                        }.getOrDefault(false)
+                    }
+                    if (duplicateAddress) {
+                        error("A proxy with this address already exists.")
+                    }
+                    val warning = probeCloneProxy(
+                        CloneProxyConfig(
+                            1,
+                            endpoint.host,
+                            endpoint.port,
+                            endpoint.username,
+                            endpoint.password
+                        )
+                    )
                     ProfileManager.createProfile(selectedGroupId, bean)
+                    warning
                 }
-            }.onSuccess {
+            }
+            result.onSuccess { warning ->
                 proxyName = ""
                 proxyAddress = ""
                 showAddDialog = false
-                message = "Proxy profile added."
-            }.onFailure {
-                dialogError = it.message ?: "Could not add this profile."
+                message = warning?.let { "Proxy verified and profile added. $it" }
+                    ?: "Proxy verified and profile added."
+            }.onFailure { error ->
+                dialogError = error.message ?: "Could not verify and add this proxy."
             }
             isSaving = false
         }
@@ -459,6 +497,30 @@ fun NekoBoxTabScreen(modifier: Modifier = Modifier) {
                                                 )
                                             }
                                         }
+                                        Box {
+                                            IconButton(
+                                                onClick = { profileMenuId = profile.id },
+                                                enabled = deletingProfileId == null,
+                                                modifier = Modifier.semantics {
+                                                    contentDescription = "Options for ${profile.displayName()}"
+                                                }
+                                            ) {
+                                                Text("⋮", style = MaterialTheme.typography.headlineSmall)
+                                            }
+                                            DropdownMenu(
+                                                expanded = profileMenuId == profile.id,
+                                                onDismissRequest = { profileMenuId = null }
+                                            ) {
+                                                DropdownMenuItem(
+                                                    text = { Text("Delete proxy") },
+                                                    enabled = deletingProfileId == null,
+                                                    onClick = {
+                                                        profileMenuId = null
+                                                        profileToDelete = profile
+                                                    }
+                                                )
+                                            }
+                                        }
                                     }
                                     Row(
                                         Modifier.fillMaxWidth(),
@@ -586,11 +648,61 @@ fun NekoBoxTabScreen(modifier: Modifier = Modifier) {
                         CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(8.dp))
                     }
-                    Text("Add proxy")
+                    Text(if (isSaving) "Testing proxy…" else "Add proxy")
                 }
             },
             dismissButton = {
                 TextButton(onClick = ::dismissAddDialog, enabled = !isSaving) { Text("Cancel") }
+            }
+        )
+    }
+
+    profileToDelete?.let { profile ->
+        val profileName = runCatching { profile.displayName() }.getOrDefault("this proxy")
+        AlertDialog(
+            onDismissRequest = {
+                if (deletingProfileId == null) profileToDelete = null
+            },
+            title = { Text("Delete proxy?") },
+            text = { Text("Delete $profileName from saved profiles?") },
+            confirmButton = {
+                TextButton(
+                    enabled = deletingProfileId == null,
+                    onClick = {
+                        if (deletingProfileId != null) return@TextButton
+                        deletingProfileId = profile.id
+                        if (serviceState.canStop &&
+                            (selectedProxyId == profile.id || DataStore.selectedProxy == profile.id)
+                        ) {
+                            disconnectProxy()
+                        }
+                        scope.launch {
+                            runCatching {
+                                withContext(Dispatchers.IO) {
+                                    ProfileManager.deleteProfile(profile.groupId, profile.id)
+                                }
+                            }.onSuccess {
+                                message = "Proxy profile deleted."
+                                profileToDelete = null
+                            }.onFailure { error ->
+                                message = error.message ?: "Could not delete this proxy profile."
+                            }
+                            deletingProfileId = null
+                        }
+                    }
+                ) {
+                    if (deletingProfileId == profile.id) {
+                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = deletingProfileId == null,
+                    onClick = { profileToDelete = null }
+                ) { Text("Cancel") }
             }
         )
     }
@@ -606,6 +718,9 @@ private fun ProxyGroup.isDefaultProxyGroup(): Boolean {
     return ungrouped || label.equals("Ungrouped", ignoreCase = true) ||
         label.equals("Default", ignoreCase = true)
 }
+
+private fun normalizeProxyHost(host: String): String =
+    host.trim().removePrefix("[").removeSuffix("]").lowercase(Locale.ROOT)
 
 private fun parseProxyAddress(input: String): ProxyEndpoint {
     val value = input.trim()

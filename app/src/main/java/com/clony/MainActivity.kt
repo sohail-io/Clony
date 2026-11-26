@@ -98,11 +98,16 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import androidx.activity.result.contract.ActivityResultContracts
 import com.clony.ui.theme.ClonyTheme
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import top.niunaijun.blackbox.BlackBoxCore
 import top.niunaijun.blackbox.core.CloneBuildPropsStore
@@ -148,7 +153,26 @@ private data class CloneProxyProfileOption(
 
 private data class CloneProxyDisplay(
     val applied: Boolean,
-    val profileName: String?
+    val ipv4: String?,
+    val lookupComplete: Boolean
+)
+
+private data class CloneProxyLookupKey(
+    val type: Int,
+    val host: String,
+    val port: Int,
+    val resolvedHost: String,
+    val username: String,
+    val password: String
+)
+
+private fun CloneProxyConfig.lookupKey() = CloneProxyLookupKey(
+    type = type,
+    host = host,
+    port = port,
+    resolvedHost = resolvedHost,
+    username = username,
+    password = password
 )
 
 private fun ProxyEntity.toCloneProxyConfig(): CloneProxyConfig {
@@ -1041,15 +1065,27 @@ class MainActivity : ComponentActivity() {
     private fun saveCloneProxy(tile: AppTile, profile: ProxyEntity?) {
         val userId = tile.virtualUserId ?: return
         if (busyPackageState.value != null) return
-        showProgress(tile.packageName, "Saving proxy for ${tile.displayName}…")
+        showProgress(
+            tile.packageName,
+            if (profile == null) "Removing proxy from ${tile.displayName}…"
+            else "Testing proxy for ${tile.displayName}…"
+        )
+        var proxyCheckFailed = false
         lifecycleScope.launch {
             try {
-                val config = withContext(Dispatchers.IO) {
+                val (config, proxyWarning) = withContext(Dispatchers.IO) {
                     val savedProfile = profile?.let { selected ->
                         SagerDatabase.proxyDao.getById(selected.id)
                             ?: error("That saved proxy profile was removed. Refresh the Proxies tab and try again.")
                     }
                     val selectedConfig = savedProfile?.toCloneProxyConfig() ?: CloneProxyConfig.parse(0, "")
+                    val warning = if (savedProfile != null) {
+                        proxyCheckFailed = true
+                        probeCloneProxy(selectedConfig)
+                            .also { proxyCheckFailed = false }
+                    } else {
+                        null
+                    }
                     val previousProxy = CloneProxyStore.read(this@MainActivity, tile.packageName, userId)
                     val previousNetwork = CloneNetworkIdentityStore.read(
                         this@MainActivity, tile.packageName, userId
@@ -1091,7 +1127,7 @@ class MainActivity : ComponentActivity() {
                     }
                     applySpoofLocation(tile.packageName, userId, defaultLocation)
                     BlackBoxCore.get().stopPackage(tile.packageName, userId)
-                    selectedConfig
+                    selectedConfig to warning
                 }
                 showInfo(
                     if (config.type == 0) {
@@ -1099,12 +1135,24 @@ class MainActivity : ComponentActivity() {
                     } else {
                         val profileName = profile?.let { runCatching { it.displayName() }.getOrNull() }
                             ?.takeIf(String::isNotBlank) ?: config.label()
-                        "Saved $profileName for ${tile.displayName}. Reopen the copy to apply it."
+                        val udpWarning = proxyWarning?.let { " $it" }.orEmpty()
+                        "Proxy test passed. Saved $profileName for ${tile.displayName}. Reopen the copy to apply it.$udpWarning"
                     }
                 )
             } catch (error: Throwable) {
                 Log.e(TRACE_TAG, "clone_proxy_save_failed package=${tile.packageName} userId=$userId", error)
-                showError(error.message?.takeIf(String::isNotBlank) ?: "Couldn't save the proxy.", null)
+                val detail = error.message?.takeIf(String::isNotBlank) ?: "Couldn't save the proxy."
+                if (proxyCheckFailed) {
+                    busyPackageState.value = null
+                    messageState.value = null
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Proxy test failed: $detail",
+                        Toast.LENGTH_LONG
+                    ).show()
+                } else {
+                    showError(detail, null)
+                }
             }
         }
     }
@@ -1624,27 +1672,70 @@ private fun ClonyHomeRedesigned(
         ) {
             return@LaunchedEffect
         }
-        val savedProxyProfiles = withContext(Dispatchers.IO) {
-            SagerDatabase.proxyDao.getAll().mapNotNull { profile ->
-                runCatching { profile.toCloneProxyConfig() to profile.displayName() }.getOrNull()
+        val configByClone = withContext(Dispatchers.IO) {
+            clones.associate { clone ->
+                val config = runCatching {
+                    val userId = clone.virtualUserId ?: return@runCatching null
+                    CloneProxyStore.read(context.applicationContext, clone.packageName, userId)
+                        .takeIf { it.type != 0 }
+                }.getOrNull()
+                cloneProxyKey(clone) to config
             }
         }
-        proxyDisplayByClone = withContext(Dispatchers.IO) {
-            clones.associate { clone ->
-                val display = runCatching {
-                    val userId = clone.virtualUserId ?: return@runCatching CloneProxyDisplay(false, null)
-                    val config = CloneProxyStore.read(context.applicationContext, clone.packageName, userId)
-                    if (config.type == 0) {
-                        CloneProxyDisplay(false, null)
-                    } else {
-                        val profileName = savedProxyProfiles.firstOrNull { (savedConfig, _) ->
-                            config.matches(savedConfig)
-                        }?.second ?: "Unknown proxy"
-                        CloneProxyDisplay(true, profileName)
+        proxyDisplayByClone = configByClone.mapValues { (_, config) ->
+            CloneProxyDisplay(
+                applied = config != null,
+                ipv4 = null,
+                lookupComplete = config == null
+            )
+        }
+        val proxyLookupLimit = Semaphore(4)
+        val clonesByProxy = clones.mapNotNull { clone ->
+            val key = cloneProxyKey(clone)
+            configByClone[key]?.let { config -> config.lookupKey() to (key to config) }
+        }.groupBy({ it.first }, { it.second })
+        coroutineScope {
+            clonesByProxy.values.map { clonesForProxy ->
+                val config = clonesForProxy.first().second
+                val cloneKeys = clonesForProxy.map { it.first }
+                async(Dispatchers.IO) {
+                    val traceId = UUID.randomUUID().toString()
+                    val cloneIdentityLog = cloneKeys.joinToString(",")
+                    Log.i(
+                        TRACE_TAG,
+                        "event=clone_ipv4_lookup_begin trace_id=$traceId clone_identities=$cloneIdentityLog proxy_type=${config.type}"
+                    )
+                    val proxyIpv4 = proxyLookupLimit.withPermit {
+                        try {
+                            ProxyRegionResolver.detectPublicIpv4(config, traceId).also {
+                                Log.i(
+                                    TRACE_TAG,
+                                    "event=clone_ipv4_lookup_complete trace_id=$traceId result=success clone_identities=$cloneIdentityLog"
+                                )
+                            }
+                        } catch (error: Exception) {
+                            val detail = error.message
+                                ?.replace(Regex("[\\r\\n\\t ]+"), "_")
+                                ?.take(120)
+                            Log.w(
+                                TRACE_TAG,
+                                "event=clone_ipv4_lookup_complete trace_id=$traceId result=failure clone_identities=$cloneIdentityLog error_type=${error.javaClass.simpleName} error_detail=$detail"
+                            )
+                            null
+                        }
                     }
-                }.getOrDefault(CloneProxyDisplay(false, null))
-                cloneProxyKey(clone) to display
-            }
+                    val updatedDisplays = cloneKeys.associateWith { key ->
+                        CloneProxyDisplay(
+                            applied = true,
+                            ipv4 = proxyIpv4,
+                            lookupComplete = true
+                        )
+                    }
+                    withContext(Dispatchers.Main) {
+                        proxyDisplayByClone = proxyDisplayByClone + updatedDisplays
+                    }
+                }
+            }.awaitAll()
         }
     }
     val containers = remember(clones) {
@@ -2062,10 +2153,16 @@ private fun ClonyHomeRedesigned(
                             items(clones.chunked(2), key = { row -> row.joinToString("|") { "${it.packageName}:${it.virtualUserId}" } }) { row ->
                                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                     row.forEach { app ->
+                                        val cloneProxyDisplay = proxyDisplayByClone[cloneProxyKey(app)]
                                         AppGridTile(
                                             app = app,
-                                            proxyProfileName = proxyDisplayByClone[cloneProxyKey(app)]?.profileName,
-                                            proxyApplied = proxyDisplayByClone[cloneProxyKey(app)]?.applied == true,
+                                            ipv4Label = if (cloneProxyDisplay?.applied == true) "Proxy IPv4" else "Public IPv4",
+                                            publicIpv4 = when {
+                                                cloneProxyDisplay?.applied != true -> phonePublicIpv4
+                                                !cloneProxyDisplay.lookupComplete -> "Checking…"
+                                                else -> cloneProxyDisplay.ipv4 ?: "Unavailable"
+                                            },
+                                            proxyApplied = cloneProxyDisplay?.applied == true,
                                             isBusy = busyPackageName == app.packageName,
                                             isEnabled = busyPackageName == null,
                                             modifier = Modifier.weight(1f),
@@ -2565,7 +2662,8 @@ private fun CloneProxyPickerSheet(
 @Composable
 private fun AppGridTile(
     app: AppTile,
-    proxyProfileName: String?,
+    ipv4Label: String,
+    publicIpv4: String,
     proxyApplied: Boolean,
     isBusy: Boolean,
     isEnabled: Boolean,
@@ -2678,10 +2776,16 @@ private fun AppGridTile(
                     }
                 )
             )
-            proxyProfileName?.let { profileName ->
+            publicIpv4.takeIf(String::isNotBlank)?.let { ipv4 ->
                 Text(
-                    "Proxy: $profileName",
+                    ipv4Label,
                     style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+                Text(
+                    ipv4,
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis

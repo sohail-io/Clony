@@ -1,5 +1,10 @@
 package com.clony
 
+import top.niunaijun.blackbox.core.NativeCore
+import top.niunaijun.blackbox.core.network.CloneProxyConfig
+import java.io.IOException
+import java.util.UUID
+
 internal fun proxyProbeFailureMessage(type: Int, result: Int): String {
     val stage = result / 1000
     val code = result % 1000
@@ -37,6 +42,31 @@ internal fun proxyProbeFailureMessage(type: Int, result: Int): String {
             "SOCKS5 TCP tunnel worked, but UDP ASSOCIATE was refused (code $code). " +
                 "This proxy may not support UDP/QUIC relay."
         }
+    }
+}
+
+/** Checks the same TCP proxy route the cloned-app runtime installs. */
+internal fun probeCloneProxy(config: CloneProxyConfig): String? {
+    val result = NativeCore.probeProxy(
+        config.type,
+        config.host,
+        config.port,
+        config.username.toByteArray(Charsets.UTF_8),
+        config.password.toByteArray(Charsets.UTF_8)
+    )
+    if (result == 0) return null
+    proxyProbeUdpWarning(config.type, result)?.let { return it }
+    val nativeFailure = IOException(proxyProbeFailureMessage(config.type, result))
+    return try {
+        // Some working proxies block the native probe's fixed IP destination.
+        // Confirm those against the same domain based route used for IPv4 lookup.
+        ProxyRegionResolver.detectPublicIpv4(config, UUID.randomUUID().toString())
+        null
+    } catch (lookupFailure: IOException) {
+        throw IOException(
+            "${nativeFailure.message} The IPv4 route check also failed: ${lookupFailure.message}",
+            nativeFailure
+        )
     }
 }
 
