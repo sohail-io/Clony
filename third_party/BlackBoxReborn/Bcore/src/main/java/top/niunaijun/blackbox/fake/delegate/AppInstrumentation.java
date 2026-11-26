@@ -24,6 +24,7 @@ import top.niunaijun.blackbox.fake.service.HCallbackProxy;
 import top.niunaijun.blackbox.fake.service.IActivityClientProxy;
 import top.niunaijun.blackbox.proxy.record.ProxyActivityRecord;
 import top.niunaijun.blackbox.utils.HackAppUtils;
+import top.niunaijun.blackbox.utils.PackedLayoutResources;
 import top.niunaijun.blackbox.utils.compat.ActivityCompat;
 import top.niunaijun.blackbox.utils.compat.ActivityManagerCompat;
 import top.niunaijun.blackbox.utils.compat.BundleCompat;
@@ -125,6 +126,15 @@ public final class AppInstrumentation extends BaseInstrumentationDelegate implem
         ActivityInfo info = BRActivity.get(activity).mActivityInfo();
         ContextCompat.fix(activity);
         ActivityCompat.fix(activity);
+        if ("com.instagram.android".equals(activity.getPackageName())) {
+            Log.i("InstagramProfilePhoto", "activity create stage=before_resources activity="
+                    + activity.getClass().getName() + " resources="
+                    + activity.getResources().getClass().getName());
+            PackedLayoutResources.installForActivity(activity);
+            Log.i("InstagramProfilePhoto", "activity create stage=after_resources activity="
+                    + activity.getClass().getName() + " resources="
+                    + activity.getResources().getClass().getName());
+        }
         if (info.theme != 0) {
             activity.getTheme().applyStyle(info.theme, true);
         }

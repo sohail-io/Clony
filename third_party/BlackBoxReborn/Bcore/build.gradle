@@ -84,6 +84,7 @@ dependencies {
     annotationProcessor(project(":compiler"))
     implementation 'androidx.appcompat:appcompat:1.7.1'
     implementation 'androidx.constraintlayout:constraintlayout:2.2.0'
+    implementation 'org.tukaani:xz:1.10'
 
     // ART Offset Verifier instrumented tests
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'

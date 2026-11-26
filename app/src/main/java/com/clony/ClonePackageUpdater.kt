@@ -18,7 +18,8 @@ internal data class ClonePackageUpdate(
     val label: String,
     val userIds: List<Int>,
     val updatedVersionCode: Long,
-    val updatedVersionName: String?
+    val updatedVersionName: String?,
+    val updatedSplitNames: List<String>
 )
 
 internal data class ClonePackageUpdateOutcome(
@@ -32,6 +33,13 @@ internal data class ClonePackageUpdateOutcome(
 @Suppress("DEPRECATION")
 private fun packageVersionCode(info: PackageInfo): Long =
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else info.versionCode.toLong()
+
+private fun packageSplitNames(info: PackageInfo): List<String> =
+    (info.applicationInfo?.splitNames ?: info.splitNames)
+        .orEmpty()
+        .filterNotNull()
+        .distinct()
+        .sorted()
 
 internal object ClonePackageUpdater {
     private const val TAG = "ClonyCloneUpdate"
@@ -76,6 +84,8 @@ internal object ClonePackageUpdater {
                     ?: return@mapNotNull null
                 val hostVersionCode = packageVersionCode(hostInfo)
                 val cloneVersionCode = packageVersionCode(cloneInfo)
+                val hostSplitNames = packageSplitNames(hostInfo)
+                val cloneSplitNames = packageSplitNames(cloneInfo)
                 val hostSharedLibraryApks = hostInfo.applicationInfo?.sharedLibraryFiles
                     .orEmpty()
                     .filter { it.endsWith(".apk", ignoreCase = true) }
@@ -85,18 +95,23 @@ internal object ClonePackageUpdater {
                     .toSet()
                 val missingSharedLibraryApks = hostSharedLibraryApks - cloneSharedLibraryApks
                 val packageVersionChanged = hostVersionCode > cloneVersionCode
+                val splitSetChanged = hostSplitNames != cloneSplitNames
                 val sharedLibraryMetadataMissing =
                     hostVersionCode == cloneVersionCode && missingSharedLibraryApks.isNotEmpty()
-                if (!packageVersionChanged && !sharedLibraryMetadataMissing) {
+                if (!packageVersionChanged && !splitSetChanged && !sharedLibraryMetadataMissing) {
                     Log.v(TAG, "clone current package=" + clonedPackage +
                         " hostVersion=" + hostVersionCode +
                         " cloneVersion=" + cloneVersionCode +
+                        " splitNames=" + cloneSplitNames +
                         " users=" + installedUsers)
                     return@mapNotNull null
                 }
                 Log.w(TAG, "clone outdated package=" + clonedPackage +
                     " hostVersion=" + hostVersionCode +
                     " cloneVersion=" + cloneVersionCode +
+                    " hostSplitNames=" + hostSplitNames +
+                    " cloneSplitNames=" + cloneSplitNames +
+                    " splitSetChanged=" + splitSetChanged +
                     " users=" + installedUsers +
                     " missingSharedLibraryApks=" + missingSharedLibraryApks)
                 val label = hostInfo.applicationInfo?.loadLabel(packageManager)?.toString()
@@ -106,7 +121,8 @@ internal object ClonePackageUpdater {
                     label = label,
                     userIds = installedUsers,
                     updatedVersionCode = hostVersionCode,
-                    updatedVersionName = hostInfo.versionName
+                    updatedVersionName = hostInfo.versionName,
+                    updatedSplitNames = hostSplitNames
                 )
             }.onFailure {
                 Log.e(TAG, "scan failed for cloned package=" + clonedPackage + " users=" + installedUsers, it)
@@ -142,7 +158,7 @@ internal object ClonePackageUpdater {
                     val runtime = BlackBoxCore.get()
                     update.userIds.forEach { userId ->
                         Log.w(TAG, "update stopping clone package=" + packageName +
-                            " userId=" + userId + " reason=host_version_newer")
+                            " userId=" + userId + " reason=host_version_or_split_set_changed")
                         runtime.stopPackage(packageName, userId)
                     }
 
@@ -155,13 +171,19 @@ internal object ClonePackageUpdater {
                     Log.i(TAG, "update install returned success package=" + packageName +
                         " userId=" + update.userIds.first() + " message=" + result.msg)
 
-                    val installedVersion = BlackBoxCore.getBPackageManager()
+                    val installedInfo = BlackBoxCore.getBPackageManager()
                         .getPackageInfo(packageName, 0, update.userIds.first())
-                        ?.let(::packageVersionCode)
+                    val installedVersion = installedInfo?.let(::packageVersionCode)
                     Log.i(TAG, "update verify package=" + packageName +
-                        " expected=" + update.updatedVersionCode + " actual=" + installedVersion)
+                        " expectedVersion=" + update.updatedVersionCode + " actualVersion=" + installedVersion +
+                        " expectedSplits=" + update.updatedSplitNames +
+                        " actualSplits=" + installedInfo?.let(::packageSplitNames))
                     if (installedVersion != update.updatedVersionCode) {
                         error("The runtime still reports version $installedVersion after the update.")
+                    }
+                    val installedSplits = installedInfo?.let(::packageSplitNames).orEmpty()
+                    if (installedSplits != update.updatedSplitNames) {
+                        error("The runtime still reports split APKs $installedSplits after the update; expected ${update.updatedSplitNames}.")
                     }
                 }
                 ClonePackageUpdateOutcome(

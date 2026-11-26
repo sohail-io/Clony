@@ -91,6 +91,7 @@ import top.niunaijun.blackbox.utils.Slog;
 import top.niunaijun.blackbox.utils.compat.BuildCompat;
 import top.niunaijun.blackbox.fake.service.FeatureFlagUtilsProxy;
 import top.niunaijun.blackbox.fake.service.WorkManagerProxy;
+import top.niunaijun.blackbox.fake.service.ILocaleManagerProxy;
 
 
 
@@ -183,6 +184,7 @@ public class HookManager {
 
             if (BuildCompat.isU()) {
                 addInjector(new ICredentialManagerProxy());
+                addInjector(new ILocaleManagerProxy());
             }
             
             if (BuildCompat.isS()) {

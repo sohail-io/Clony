@@ -57,6 +57,7 @@ import black.android.app.BRService;
 import black.android.app.LoadedApk;
 import black.android.content.BRBroadcastReceiver;
 import black.android.content.BRContentProviderClient;
+import black.android.content.res.BRAssetManager;
 import black.android.graphics.BRCompatibility;
 import black.android.security.net.config.BRNetworkSecurityConfigProvider;
 import black.com.android.internal.content.BRReferrerIntent;
@@ -78,6 +79,7 @@ import top.niunaijun.blackbox.core.system.user.BUserHandle;
 import top.niunaijun.blackbox.entity.AppConfig;
 import top.niunaijun.blackbox.entity.am.ReceiverData;
 import top.niunaijun.blackbox.utils.VirtualRuntimeTrace;
+import top.niunaijun.blackbox.utils.PackedLayoutResources;
 import top.niunaijun.blackbox.utils.VirtualCloneDiagnostics;
 
 import top.niunaijun.blackbox.fake.delegate.AppInstrumentation;
@@ -506,6 +508,8 @@ public class BActivityThread extends IBActivityThread.Stub {
         BRLoadedApk.get(loadedApk)._set_mSecurityViolation(false);
         
         BRLoadedApk.get(loadedApk)._set_mApplicationInfo(applicationInfo);
+        ensureSplitApkAssets(packageContext, applicationInfo);
+        PackedLayoutResources.install(packageContext, loadedApk, applicationInfo.sourceDir);
 
         int targetSdkVersion = applicationInfo.targetSdkVersion;
         if (targetSdkVersion < Build.VERSION_CODES.GINGERBREAD) {
@@ -628,6 +632,9 @@ public class BActivityThread extends IBActivityThread.Stub {
                     .installForContext(application)) {
                 Slog.e(TAG, "CredentialManager proxy could not be applied to clone context package="
                         + packageName + " userId=" + getUserId());
+            }
+            if (BuildCompat.isU()) {
+                top.niunaijun.blackbox.fake.service.ILocaleManagerProxy.installForContext(application);
             }
             
             mInitialApplication = application;
@@ -1119,6 +1126,43 @@ public class BActivityThread extends IBActivityThread.Stub {
             e.printStackTrace();
         }
         return null;
+    }
+
+    /**
+     * A package context can be created from the base APK before the virtual
+     * LoadedApk's ApplicationInfo is installed. Add every copied split to the
+     * same AssetManager before the cloned Application is created so layouts,
+     * drawables, and other resources packaged in splits remain resolvable.
+     */
+    private static void ensureSplitApkAssets(Context packageContext, ApplicationInfo info) {
+        if (packageContext == null || info == null || info.splitSourceDirs == null
+                || info.splitSourceDirs.length == 0) {
+            return;
+        }
+        try {
+            android.content.res.AssetManager assets = packageContext.getAssets();
+            int added = 0;
+            for (String splitPath : info.splitSourceDirs) {
+                if (splitPath == null || splitPath.isEmpty() || !new File(splitPath).isFile()) {
+                    Slog.w(TAG, "Skipping unavailable split resource APK for "
+                            + info.packageName + ": " + splitPath);
+                    continue;
+                }
+                Integer cookie = BRAssetManager.get(assets).addAssetPath(splitPath);
+                if (cookie != null && cookie != 0) {
+                    added++;
+                } else {
+                    Slog.w(TAG, "Could not add split resource APK for "
+                            + info.packageName + ": " + splitPath);
+                }
+            }
+            if (added > 0) {
+                Slog.i(TAG, "Added " + added + " split resource APKs for " + info.packageName);
+            }
+        } catch (Throwable error) {
+            Slog.w(TAG, "Could not add split resource APKs for " + info.packageName
+                    + ": " + error.getClass().getSimpleName());
+        }
     }
 
     

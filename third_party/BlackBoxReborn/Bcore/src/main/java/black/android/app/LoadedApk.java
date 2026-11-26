@@ -8,6 +8,7 @@ import android.content.Context;
 import android.content.IIntentReceiver;
 import android.content.ServiceConnection;
 import android.content.pm.ApplicationInfo;
+import android.content.res.Resources;
 import android.os.Handler;
 import android.os.IInterface;
 
@@ -25,6 +26,12 @@ public interface LoadedApk {
 
     @BField
     ApplicationInfo mApplicationInfo();
+
+    @BField
+    Resources mResources();
+
+    @top.niunaijun.blackreflection.annotation.BFieldSetNotProcess
+    void _set_mResources(Resources resources);
 
     @BField
     File mCredentialProtectedDataDirFile();

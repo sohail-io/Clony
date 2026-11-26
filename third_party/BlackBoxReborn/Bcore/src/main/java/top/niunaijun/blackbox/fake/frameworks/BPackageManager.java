@@ -415,7 +415,8 @@ public class BPackageManager extends BlackManager<IBPackageManagerService> {
                 Log.w(TAG, "PackageManager service is null for getProviderInfo, returning null");
                 return null;
             }
-            return service.getProviderInfo(component, flags, userId);
+            ProviderInfo providerInfo = service.getProviderInfo(component, flags, userId);
+            return providerInfo;
         } catch (RemoteException e) {
             Log.e(TAG, "RemoteException in getProviderInfo for " + component, e);
             return null;

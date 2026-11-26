@@ -6,6 +6,7 @@ import android.os.Bundle;
 import android.os.Process;
 import android.util.Log;
 
+import java.lang.ref.WeakReference;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -16,6 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class VirtualRuntimeTrace {
     public static final String TAG = "ClonyVirtualRuntime";
     private static final Set<String> SEEN_EVENTS = ConcurrentHashMap.newKeySet();
+    private static volatile WeakReference<Activity> sCurrentActivity = new WeakReference<>(null);
 
     private VirtualRuntimeTrace() {
     }
@@ -83,7 +85,7 @@ public final class VirtualRuntimeTrace {
     }
 
     public static void registerActivityCallbacks(Application application, int userId) {
-        if (!isEnabled() || application == null) return;
+        if (application == null) return;
         application.registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
             @Override
             public void onActivityCreated(Activity activity, Bundle state) {
@@ -97,6 +99,7 @@ public final class VirtualRuntimeTrace {
 
             @Override
             public void onActivityResumed(Activity activity) {
+                sCurrentActivity = new WeakReference<>(activity);
                 VirtualRuntimeTrace.activity("activity_resumed", activity, userId);
             }
 
@@ -114,9 +117,16 @@ public final class VirtualRuntimeTrace {
 
             @Override
             public void onActivityDestroyed(Activity activity) {
+                if (sCurrentActivity.get() == activity) {
+                    sCurrentActivity = new WeakReference<>(null);
+                }
                 VirtualRuntimeTrace.activity("activity_destroyed", activity, userId);
             }
         });
+    }
+
+    public static Activity getCurrentActivity() {
+        return sCurrentActivity.get();
     }
 
     private static boolean isEnabled() {

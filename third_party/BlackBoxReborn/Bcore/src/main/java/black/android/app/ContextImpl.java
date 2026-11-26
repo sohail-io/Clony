@@ -3,6 +3,7 @@ package black.android.app;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.content.res.Resources;
 
 import top.niunaijun.blackreflection.annotation.BClassName;
 import top.niunaijun.blackreflection.annotation.BField;
@@ -22,6 +23,12 @@ public interface ContextImpl {
 
     @BField
     PackageManager mPackageManager();
+
+    @BField
+    Resources mResources();
+
+    @top.niunaijun.blackreflection.annotation.BFieldSetNotProcess
+    void _set_mResources(Resources resources);
 
     @BStaticMethod
     Object createAppContext();

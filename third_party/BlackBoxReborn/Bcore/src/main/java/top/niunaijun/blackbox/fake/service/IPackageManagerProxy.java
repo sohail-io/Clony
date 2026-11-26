@@ -208,6 +208,10 @@ public class IPackageManagerProxy extends BinderInvocationStub {
                 }
             }
             if (packageInfo != null) {
+                if ((flags & PackageManager.GET_PROVIDERS) != 0
+                        && packageName.equals(BActivityThread.getAppPackageName())) {
+                    mergeInstalledProviders(who, method, args, packageInfo);
+                }
                 
                 if (packageInfo.requestedPermissions != null && packageInfo.requestedPermissionsFlags != null) {
                     for (int i = 0; i < packageInfo.requestedPermissions.length; i++) {
@@ -293,13 +297,56 @@ public class IPackageManagerProxy extends BinderInvocationStub {
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
             ComponentName componentName = (ComponentName) args[0];
             int flags = MethodParameterUtils.toInt(args[1]);
-            ProviderInfo providerInfo = BlackBoxCore.getBPackageManager().getProviderInfo(componentName, flags, BlackBoxCore.getUserId());
+            ProviderInfo providerInfo = BlackBoxCore.getBPackageManager().getProviderInfo(componentName, flags, BActivityThread.getUserId());
             if (providerInfo != null)
                 return providerInfo;
+            if (componentName.getPackageName().equals(BActivityThread.getAppPackageName())) {
+                ProviderInfo installedProvider = (ProviderInfo) method.invoke(who, args);
+                if (installedProvider != null) {
+                    ApplicationInfo virtualAppInfo = BlackBoxCore.getBPackageManager().getApplicationInfo(
+                            componentName.getPackageName(), flags, BActivityThread.getUserId());
+                    if (virtualAppInfo != null) installedProvider.applicationInfo = virtualAppInfo;
+                    return installedProvider;
+                }
+            }
             if (AppSystemEnv.isOpenPackage(componentName)) {
                 return method.invoke(who, args);
             }
             return null;
+        }
+    }
+
+    private static void mergeInstalledProviders(Object who, Method method, Object[] args,
+                                                PackageInfo virtualInfo) {
+        try {
+            PackageInfo installedInfo = (PackageInfo) method.invoke(who, args);
+            if (installedInfo == null || installedInfo.providers == null
+                    || installedInfo.providers.length == 0) return;
+
+            ArrayList<ProviderInfo> providers = new ArrayList<>();
+            if (virtualInfo.providers != null) {
+                providers.addAll(Arrays.asList(virtualInfo.providers));
+            }
+            for (ProviderInfo installedProvider : installedInfo.providers) {
+                if (installedProvider == null || installedProvider.name == null) continue;
+                boolean exists = false;
+                for (ProviderInfo provider : providers) {
+                    if (provider != null && installedProvider.name.equals(provider.name)) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) providers.add(new ProviderInfo(installedProvider));
+            }
+            for (ProviderInfo provider : providers) {
+                if (provider != null) provider.applicationInfo = virtualInfo.applicationInfo;
+            }
+            virtualInfo.providers = providers.toArray(new ProviderInfo[0]);
+            Slog.i(TAG, "Merged installed provider metadata for cloned package="
+                    + virtualInfo.packageName + " providers=" + providers.size());
+        } catch (Throwable error) {
+            Slog.w(TAG, "Could not merge installed provider metadata for "
+                    + virtualInfo.packageName + ": " + error.getClass().getSimpleName());
         }
     }
 

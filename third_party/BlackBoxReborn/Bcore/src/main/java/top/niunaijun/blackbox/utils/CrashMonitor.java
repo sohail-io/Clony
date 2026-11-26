@@ -4,9 +4,13 @@ import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.app.Activity;
+import android.content.res.AssetManager;
+import android.content.res.Resources;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.TypedValue;
 
 import java.io.File;
 import java.io.FileWriter;
@@ -14,10 +18,13 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Array;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import top.niunaijun.blackbox.BlackBoxCore;
@@ -49,15 +56,17 @@ public class CrashMonitor {
         public final String packageName;
         public final String errorMessage;
         public final String stackTrace;
+        public final String diagnostics;
         public final long timestamp;
         public final boolean wasRecovered;
         
         public CrashInfo(String crashType, String packageName, String errorMessage, 
-                        String stackTrace, boolean wasRecovered) {
+                        String stackTrace, String diagnostics, boolean wasRecovered) {
             this.crashType = crashType;
             this.packageName = packageName;
             this.errorMessage = errorMessage;
             this.stackTrace = stackTrace;
+            this.diagnostics = diagnostics;
             this.timestamp = System.currentTimeMillis();
             this.wasRecovered = wasRecovered;
         }
@@ -209,12 +218,13 @@ public class CrashMonitor {
             String packageName = getCurrentPackageName();
             String errorMessage = throwable != null ? throwable.getMessage() : "Unknown error";
             String stackTrace = getStackTrace(throwable);
+            String diagnostics = getCrashDiagnostics(thread, throwable);
             
-            return new CrashInfo(crashType, packageName, errorMessage, stackTrace, false);
+            return new CrashInfo(crashType, packageName, errorMessage, stackTrace, diagnostics, false);
             
         } catch (Exception e) {
             Slog.w(TAG, "Error creating crash info: " + e.getMessage());
-            return new CrashInfo(crashType, "unknown", "Error creating crash info", "", false);
+            return new CrashInfo(crashType, "unknown", "Error creating crash info", "", "", false);
         }
     }
     
@@ -248,6 +258,130 @@ public class CrashMonitor {
             return "Error getting stack trace: " + e.getMessage();
         }
     }
+
+    private static String getCrashDiagnostics(Thread thread, Throwable throwable) {
+        StringBuilder out = new StringBuilder(2048);
+        appendLine(out, "Process", BActivityThread.getAppProcessName());
+        appendLine(out, "VirtualUserId", String.valueOf(BActivityThread.getUserId()));
+        appendLine(out, "Pid", String.valueOf(android.os.Process.myPid()));
+        appendLine(out, "Thread", thread == null ? null : thread.getName());
+
+        Activity activity = VirtualRuntimeTrace.getCurrentActivity();
+        Resources resources = null;
+        ApplicationInfo appInfo = null;
+        if (activity != null) {
+            try {
+                appendLine(out, "CurrentActivity", activity.getComponentName().flattenToShortString());
+                resources = activity.getResources();
+                appInfo = activity.getApplicationInfo();
+            } catch (Throwable error) {
+                appendLine(out, "ActivityDiagnosticError", error.toString());
+            }
+        }
+        if (appInfo == null) {
+            try {
+                android.app.Application application = BActivityThread.getApplication();
+                if (application != null) {
+                    appInfo = application.getApplicationInfo();
+                    if (resources == null) resources = application.getResources();
+                }
+            } catch (Throwable error) {
+                appendLine(out, "ApplicationDiagnosticError", error.toString());
+            }
+        }
+
+        if (appInfo != null) {
+            appendLine(out, "ApplicationInfoPackage", appInfo.packageName);
+            appendApkPath(out, "BaseApk", appInfo.sourceDir);
+            String[] splitPaths = appInfo.splitSourceDirs;
+            appendLine(out, "SplitApkCount", String.valueOf(splitPaths == null ? 0 : splitPaths.length));
+            if (splitPaths != null) {
+                for (int i = 0; i < splitPaths.length; i++) {
+                    appendApkPath(out, "SplitApk[" + i + "]", splitPaths[i]);
+                }
+            }
+        } else {
+            appendLine(out, "ApplicationInfo", "unavailable");
+        }
+
+        appendCauseChain(out, throwable);
+        appendMissingResourceDetails(out, resources, throwable);
+        return out.toString();
+    }
+
+    private static void appendCauseChain(StringBuilder out, Throwable throwable) {
+        int index = 0;
+        for (Throwable cause = throwable; cause != null && index < 20; cause = cause.getCause(), index++) {
+            appendLine(out, "Cause[" + index + "]", cause.getClass().getName() + ": " + cause.getMessage());
+        }
+    }
+
+    private static void appendMissingResourceDetails(StringBuilder out, Resources resources,
+                                                      Throwable throwable) {
+        if (resources == null || throwable == null) return;
+        Pattern resourceIdPattern = Pattern.compile("(?i)resource ID #?(0x[0-9a-f]+)");
+        for (Throwable cause = throwable; cause != null; cause = cause.getCause()) {
+            if (!(cause instanceof Resources.NotFoundException)) continue;
+            Matcher matcher = resourceIdPattern.matcher(String.valueOf(cause.getMessage()));
+            if (!matcher.find()) {
+                appendLine(out, "MissingResource", String.valueOf(cause.getMessage()));
+                continue;
+            }
+            try {
+                int resourceId = (int) Long.parseLong(matcher.group(1).substring(2), 16);
+                appendLine(out, "MissingResourceId", matcher.group(1));
+                appendLine(out, "MissingResourceName", resources.getResourceName(resourceId));
+                appendLine(out, "MissingResourceType", resources.getResourceTypeName(resourceId));
+                appendLine(out, "MissingResourceEntry", resources.getResourceEntryName(resourceId));
+
+                TypedValue value = new TypedValue();
+                resources.getValue(resourceId, value, true);
+                appendLine(out, "MissingResourceAssetCookie", String.valueOf(value.assetCookie));
+                appendLine(out, "MissingResourceFile", value.string == null
+                        ? "<no file path in resource table>" : value.string.toString());
+                appendAssetPaths(out, resources.getAssets(), value.assetCookie);
+            } catch (Throwable error) {
+                appendLine(out, "MissingResourceLookupError", error.toString());
+            }
+        }
+    }
+
+    private static void appendAssetPaths(StringBuilder out, AssetManager assets, int wantedCookie) {
+        if (assets == null) return;
+        try {
+            Method getApkAssets = AssetManager.class.getDeclaredMethod("getApkAssets");
+            getApkAssets.setAccessible(true);
+            Object apkAssets = getApkAssets.invoke(assets);
+            int count = Array.getLength(apkAssets);
+            appendLine(out, "LoadedApkAssetCount", String.valueOf(count));
+            for (int i = 0; i < count; i++) {
+                Object apkAsset = Array.get(apkAssets, i);
+                Method getAssetPath = apkAsset.getClass().getDeclaredMethod("getAssetPath");
+                getAssetPath.setAccessible(true);
+                String path = String.valueOf(getAssetPath.invoke(apkAsset));
+                int cookie = i + 1;
+                appendLine(out, "LoadedApkAsset[" + cookie + "]", path
+                        + (cookie == wantedCookie ? " [RESOURCE COOKIE MATCH]" : ""));
+            }
+        } catch (Throwable error) {
+            appendLine(out, "LoadedApkAssetPathsError", error.getClass().getName() + ": "
+                    + error.getMessage());
+        }
+    }
+
+    private static void appendApkPath(StringBuilder out, String label, String path) {
+        if (path == null || path.isEmpty()) {
+            appendLine(out, label, "<empty>");
+            return;
+        }
+        File file = new File(path);
+        appendLine(out, label, path + " exists=" + file.exists() + " readable=" + file.canRead()
+                + " bytes=" + (file.isFile() ? file.length() : -1));
+    }
+
+    private static void appendLine(StringBuilder out, String label, String value) {
+        out.append(label).append(": ").append(value == null ? "unknown" : value).append('\n');
+    }
     
     
     private static void writeCrashLog(CrashInfo crashInfo) {
@@ -270,12 +404,15 @@ public class CrashMonitor {
                 writer.println("Package: " + crashInfo.packageName);
                 writer.println("Error: " + crashInfo.errorMessage);
                 writer.println("Recovered: " + crashInfo.wasRecovered);
+                writer.println("=== PROCESS / RESOURCE DIAGNOSTICS ===");
+                writer.println(crashInfo.diagnostics);
                 writer.println("=== STACK TRACE ===");
                 writer.println(crashInfo.stackTrace);
                 writer.println("=== END ===");
             }
             
             Slog.d(TAG, "Crash log written to: " + logFile.getAbsolutePath());
+            Slog.e(TAG, "Crash context diagnostics:\n" + crashInfo.diagnostics);
             
         } catch (Exception e) {
             Slog.w(TAG, "Failed to write crash log: " + e.getMessage());
