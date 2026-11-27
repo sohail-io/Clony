@@ -5,7 +5,6 @@ import android.content.SharedPreferences;
 
 /** Stores per-copy network identity controls and defaults for future copies. */
 public final class CloneNetworkIdentityStore {
-    public static final String SIM_PROFILE_TEST_PACKAGE = "dubai.blinds.curtains";
     private static final String PREFERENCES = "clone_network_identity_v1";
     private static final String KEY_PREFIX = "network_identity:";
 

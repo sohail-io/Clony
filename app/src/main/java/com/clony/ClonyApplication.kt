@@ -36,11 +36,22 @@ private object VirtualWebViewDataDirectoryCompat {
     private const val TAG = "ClonyWebView"
     private const val HEX = "0123456789abcdef"
 
-    fun configure(packageName: String?, processName: String?, userId: Int, context: Context?) {
+    fun configure(
+        packageName: String?,
+        processName: String?,
+        userId: Int,
+        virtualProcessId: Int,
+        context: Context?
+    ) {
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.P) return
         if (packageName.isNullOrBlank()) return
 
-        val identity = "$packageName\u0000${processName.orEmpty()}"
+        val processIdentity = if (virtualProcessId >= 0) {
+            "b$virtualProcessId"
+        } else {
+            "pid${android.os.Process.myPid()}"
+        }
+        val identity = "$packageName\u0000${processName.orEmpty()}\u0000$userId\u0000$processIdentity"
         val digest = MessageDigest.getInstance("SHA-256")
             .digest(identity.toByteArray(Charsets.UTF_8))
         val suffix = buildString {
@@ -53,7 +64,13 @@ private object VirtualWebViewDataDirectoryCompat {
         }
 
         runCatching { WebView.setDataDirectorySuffix(suffix) }
-            .onSuccess { Log.i(TAG, "Set WebView data directory for $packageName process=${processName.orEmpty()} user=$userId") }
+            .onSuccess {
+                Log.i(
+                    TAG,
+                    "Set WebView data directory for $packageName process=${processName.orEmpty()} " +
+                        "user=$userId virtualProcess=$processIdentity"
+                )
+            }
             .onFailure { error -> Log.w(TAG, "Could not set WebView data directory for $packageName", error) }
 
         runCatching {
@@ -175,7 +192,13 @@ class ClonyApplication : io.nekohasekai.sagernet.SagerNet() {
                 context: Context?,
                 userId: Int
             ) {
-                VirtualWebViewDataDirectoryCompat.configure(packageName, processName, userId, context)
+                VirtualWebViewDataDirectoryCompat.configure(
+                    packageName,
+                    processName,
+                    userId,
+                    BActivityThread.getAppPid(),
+                    context
+                )
                 Log.i(TRACE_TAG, "virtualApp stage=beforeCreate package=" + packageName +
                     " process=" + processName + " userId=" + userId)
             }

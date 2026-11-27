@@ -32,6 +32,10 @@ import top.niunaijun.blackbox.proxy.record.ProxyServiceRecord;
 @SuppressLint("NewApi")
 public class ActiveServices {
     public static final String TAG = "ActiveServices";
+    private static final String CHROMIUM_NATIVE_ONLY_SERVICE_PREFIX =
+            "org.chromium.content.app.NativeOnlySandboxedProcessService";
+    private static final String CHROMIUM_JAVA_SANDBOX_SERVICE_PREFIX =
+            "org.chromium.content.app.SandboxedProcessService";
 
     private final Map<Intent.FilterComparison, RunningServiceRecord> mRunningServiceRecords = new HashMap<>();
     private final Map<IBinder, RunningServiceRecord> mRunningTokens = new HashMap<>();
@@ -267,7 +271,34 @@ public class ActiveServices {
     }
 
     private ResolveInfo resolveService(Intent intent, String resolvedType, int userId) {
-        return BPackageManagerService.get().resolveService(intent, 0, resolvedType, userId);
+        ResolveInfo resolved = BPackageManagerService.get().resolveService(intent, 0, resolvedType, userId);
+        if (resolved == null || resolved.serviceInfo == null) return resolved;
+
+        ServiceInfo nativeService = resolved.serviceInfo;
+        String className = nativeService.name;
+        if (className == null || !className.startsWith(CHROMIUM_NATIVE_ONLY_SERVICE_PREFIX)) {
+            return resolved;
+        }
+
+        String serviceIndex = className.substring(CHROMIUM_NATIVE_ONLY_SERVICE_PREFIX.length());
+        if (serviceIndex.isEmpty() || !serviceIndex.matches("\\d+")) return resolved;
+
+        ComponentName javaFallback = new ComponentName(
+                nativeService.packageName,
+                CHROMIUM_JAVA_SANDBOX_SERVICE_PREFIX + serviceIndex
+        );
+        ServiceInfo fallbackInfo = BPackageManagerService.get().getServiceInfo(javaFallback, 0, userId);
+        if (fallbackInfo == null) {
+            Log.w(TAG, "Native-only Chromium service has no Java fallback package=" +
+                    nativeService.packageName + " service=" + className);
+            return resolved;
+        }
+
+        Log.i(TAG, "Using Java sandbox-service fallback for Chromium native-only service package=" +
+                nativeService.packageName + " service=" + className);
+        intent.setComponent(javaFallback);
+        resolved.serviceInfo = fallbackInfo;
+        return resolved;
     }
 
     public static class RunningServiceRecord extends IEmpty.Stub {

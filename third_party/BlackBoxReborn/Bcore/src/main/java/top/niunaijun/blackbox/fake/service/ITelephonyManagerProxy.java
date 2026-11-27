@@ -2,6 +2,7 @@ package top.niunaijun.blackbox.fake.service;
 
 import android.content.Context;
 import android.os.IBinder;
+import android.telephony.TelephonyManager;
 import android.util.Log;
 
 import java.lang.reflect.Method;
@@ -81,6 +82,8 @@ public class ITelephonyManagerProxy extends BinderInvocationStub {
     public static class getLine1NumberForDisplay extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            String simulated = simulatedPhoneNumber(identityOptions());
+            if (simulated != null) return simulated;
             return null;
         }
     }
@@ -111,13 +114,23 @@ public class ITelephonyManagerProxy extends BinderInvocationStub {
         // package for these identifier reads before Android checks access.
         MethodParameterUtils.replaceFirstAppPkg(args);
         Object platformValue = method.invoke(who, args);
+        String packageName = BActivityThread.getAppPackageName();
+        int userId = BActivityThread.getUserId();
+        CloneNetworkIdentityStore.Options options = identityOptions();
+        if (isSimProfileActive(options)
+                && ("imei".equals(identifierKind) || "device_id".equals(identifierKind))) {
+            return VirtualDeviceIdentity.getTelephonyId(
+                    BlackBoxCore.getContext(), packageName, userId, "imei");
+        }
+        if (isSimProfileActive(options) && "imsi".equals(identifierKind)) {
+            return VirtualDeviceIdentity.getProfileImsi(
+                    BlackBoxCore.getContext(), packageName, userId, options.simOperatorCode);
+        }
         if (!(platformValue instanceof String) || ((String) platformValue).isEmpty()) {
             return platformValue;
         }
 
-        String packageName = BActivityThread.getAppPackageName();
-        int userId = BActivityThread.getUserId();
-        if (!identityOptions().changeTelephonyIds) {
+        if (!options.changeTelephonyIds) {
             // Do not pass the host hardware identifier through when cloning is disabled.
             return null;
         }
@@ -136,11 +149,44 @@ public class ITelephonyManagerProxy extends BinderInvocationStub {
     }
 
     static boolean hideSimOperatorInfo() {
-        CloneNetworkIdentityStore.Options options = identityOptions();
-        return options.hideSimOperatorInfo || options.matchProxyRegion;
+        return shouldSuppressCellDetails(identityOptions());
     }
 
-    private static CloneNetworkIdentityStore.Options identityOptions() {
+    static boolean shouldSuppressCellDetails(CloneNetworkIdentityStore.Options options) {
+        return options != null && (options.hideSimOperatorInfo
+                || options.matchProxyRegion
+                || isSimProfileActive(options));
+    }
+
+    static boolean shouldSuppressPhoneNumber() {
+        return shouldSuppressPhoneNumber(identityOptions());
+    }
+
+    static boolean shouldSuppressPhoneNumber(CloneNetworkIdentityStore.Options options) {
+        return !isSimProfileActive(options) && options != null
+                && (options.hideSimOperatorInfo || options.matchProxyRegion);
+    }
+
+    static boolean isSimProfileActive(CloneNetworkIdentityStore.Options options) {
+        return options != null && options.simulateSimProfile
+                && options.simCountryIso.matches("(?i)[a-z]{2}")
+                && !options.simCarrierName.trim().isEmpty()
+                && options.simOperatorCode.matches("[0-9]{5,6}");
+    }
+
+    static int simStateOverride(CloneNetworkIdentityStore.Options options, int platformState) {
+        return isSimProfileActive(options) ? TelephonyManager.SIM_STATE_READY : platformState;
+    }
+
+    static String simulatedPhoneNumber(CloneNetworkIdentityStore.Options options) {
+        if (!isSimProfileActive(options)) return null;
+        String generatedNumber = VirtualDeviceIdentity.getProfilePhoneNumber(
+                BlackBoxCore.getContext(), BActivityThread.getAppPackageName(),
+                BActivityThread.getUserId(), options.simCountryIso);
+        return generatedNumber == null ? "" : generatedNumber;
+    }
+
+    static CloneNetworkIdentityStore.Options identityOptions() {
         return CloneNetworkIdentityStore.read(
                 BlackBoxCore.getContext(),
                 BActivityThread.getAppPackageName(),
@@ -150,50 +196,72 @@ public class ITelephonyManagerProxy extends BinderInvocationStub {
 
     static Object hideSimOperatorString(Object who, Method method, Object[] args) throws Throwable {
         CloneNetworkIdentityStore.Options options = identityOptions();
-        if (options.matchProxyRegion) {
-            String methodName = method.getName().toLowerCase(java.util.Locale.ROOT);
-            if (methodName.contains("countryiso")) return options.proxyCountryIso;
-            // Do not report the phone's MCC/MNC or carrier when only the proxy
-            // country is known. Cell and neighboring-cell APIs are hidden too.
-            return "";
-        }
-        if (isDubaiCurtainsTestProfileEnabled(options)) {
-            String methodName = method.getName().toLowerCase(java.util.Locale.ROOT);
-            String configured = null;
-            if (methodName.contains("countryiso")) {
-                configured = options.simCountryIso;
-            } else if (methodName.contains("operatorname")) {
-                configured = options.simCarrierName;
-            } else if (methodName.contains("operatornumeric")
-                    || methodName.contains("simoperator")
-                    || methodName.contains("networkoperator")) {
-                configured = options.simOperatorCode;
-            }
-            return configured == null ? "" : configured.trim();
-        }
-        if (options.hideSimOperatorInfo) return "";
+        String override = operatorStringOverride(options, method.getName());
+        if (override != null) return override;
         return method.invoke(who, args);
     }
 
-    static String simulatedPhoneNumber() {
-        CloneNetworkIdentityStore.Options options = identityOptions();
-        if (!isDubaiCurtainsTestProfileEnabled(options)) return null;
-        String number = options.simPhoneNumber == null ? "" : options.simPhoneNumber.trim();
-        return number.isEmpty() ? null : number;
+    static String operatorStringOverride(
+            CloneNetworkIdentityStore.Options options,
+            String methodName
+    ) {
+        if (options == null || methodName == null) return null;
+        String normalizedMethod = methodName.toLowerCase(java.util.Locale.ROOT);
+        // A user-selected SIM profile is explicit and takes precedence over
+        // proxy-country matching and the old redaction option for these values.
+        if (isSimProfileActive(options)) {
+            if (normalizedMethod.contains("countryiso")) return options.simCountryIso.trim();
+            if (normalizedMethod.contains("operatorname")
+                    || normalizedMethod.contains("serviceprovidername")) {
+                return options.simCarrierName.trim();
+            }
+            if (normalizedMethod.contains("operatornumeric")
+                    || normalizedMethod.contains("simoperator")
+                    || normalizedMethod.contains("networkoperator")) {
+                return options.simOperatorCode.trim();
+            }
+            return "";
+        }
+
+        if (options.hideSimOperatorInfo) return "";
+
+        if (options.matchProxyRegion) {
+            if (normalizedMethod.contains("countryiso")) return options.proxyCountryIso;
+            // The proxy reveals a country, not a mobile carrier or cell.
+            return "";
+        }
+        return null;
     }
 
-    static boolean isDubaiCurtainsTestProfileEnabled() {
-        return isDubaiCurtainsTestProfileEnabled(identityOptions());
+    @ProxyMethod("getSimState")
+    public static class GetSimState extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            CloneNetworkIdentityStore.Options options = identityOptions();
+            if (isSimProfileActive(options)) return TelephonyManager.SIM_STATE_READY;
+            return method.invoke(who, args);
+        }
     }
-    private static boolean isDubaiCurtainsTestProfileEnabled(CloneNetworkIdentityStore.Options options) {
-        return options != null && options.simulateSimProfile;
+
+    @ProxyMethod("getSimStateForSlotIndex")
+    public static class GetSimStateForSlotIndex extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            CloneNetworkIdentityStore.Options options = identityOptions();
+            if (isSimProfileActive(options)) return TelephonyManager.SIM_STATE_READY;
+            return method.invoke(who, args);
+        }
     }
-//    private static boolean isDubaiCurtainsTestProfileEnabled(CloneNetworkIdentityStore.Options options) {
-//        return options != null
-//                && options.simulateSimProfile
-//                && CloneNetworkIdentityStore.SIM_PROFILE_TEST_PACKAGE.equals(BActivityThread.getAppPackageName()
-//        );
-//    }
+
+    @ProxyMethod("getSimStateForPhoneId")
+    public static class GetSimStateForPhoneId extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            CloneNetworkIdentityStore.Options options = identityOptions();
+            if (isSimProfileActive(options)) return TelephonyManager.SIM_STATE_READY;
+            return method.invoke(who, args);
+        }
+    }
 
     @ProxyMethod("getCellLocation")
     public static class GetCellLocation extends MethodHook {
@@ -201,7 +269,6 @@ public class ITelephonyManagerProxy extends BinderInvocationStub {
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
             Log.d(TAG, "getCellLocation");
             if (hideSimOperatorInfo()) {
-                method.invoke(who, args);
                 return null;
             }
             if (BLocationManager.isFakeLocationEnable()) {
@@ -220,7 +287,6 @@ public class ITelephonyManagerProxy extends BinderInvocationStub {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
             if (hideSimOperatorInfo()) {
-                method.invoke(who, args);
                 return java.util.Collections.emptyList();
             }
             if (BLocationManager.isFakeLocationEnable()) {
@@ -285,8 +351,32 @@ public class ITelephonyManagerProxy extends BinderInvocationStub {
         }
     }
 
+    @ProxyMethod("getServiceProviderNameForPhone")
+    public static class GetServiceProviderNameForPhone extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            return hideSimOperatorString(who, method, args);
+        }
+    }
+
+    @ProxyMethod("getServiceProviderNameForSubscriber")
+    public static class GetServiceProviderNameForSubscriber extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            return hideSimOperatorString(who, method, args);
+        }
+    }
+
     @ProxyMethod("getSimOperatorNumericForPhone")
     public static class GetSimOperatorNumericForPhone extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            return hideSimOperatorString(who, method, args);
+        }
+    }
+
+    @ProxyMethod("getSimOperatorNumeric")
+    public static class GetSimOperatorNumeric extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
             return hideSimOperatorString(who, method, args);
@@ -341,6 +431,14 @@ public class ITelephonyManagerProxy extends BinderInvocationStub {
         }
     }
 
+    @ProxyMethod("getSimOperatorName")
+    public static class GetSimOperatorName extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            return hideSimOperatorString(who, method, args);
+        }
+    }
+
     @ProxyMethod("getSimOperator")
     public static class GetSimOperator extends MethodHook {
         @Override
@@ -383,7 +481,6 @@ public class ITelephonyManagerProxy extends BinderInvocationStub {
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
             Log.d(TAG, "getNeighboringCellInfo");
             if (hideSimOperatorInfo()) {
-                method.invoke(who, args);
                 return java.util.Collections.emptyList();
             }
             if (BLocationManager.isFakeLocationEnable()) {

@@ -69,6 +69,7 @@ import top.niunaijun.blackbox.fake.service.IPackageManagerProxy;
 import top.niunaijun.blackbox.fake.service.IPermissionManagerProxy;
 import top.niunaijun.blackbox.fake.service.IPersistentDataBlockServiceProxy;
 import top.niunaijun.blackbox.fake.service.IPhoneSubInfoProxy;
+import top.niunaijun.blackbox.fake.service.ISubProxy;
 import top.niunaijun.blackbox.fake.service.IPowerManagerProxy;
 import top.niunaijun.blackbox.fake.service.IRoleManagerProxy;
 import top.niunaijun.blackbox.fake.service.ILocaleManagerProxy;
@@ -168,6 +169,7 @@ public class HookManager {
         addInjector(new IXiaomiSettingsProxy());
         addInjector(new IXiaomiMiuiServicesProxy());
             addInjector(new IPhoneSubInfoProxy());
+            addInjector(new ISubProxy());
             addInjector(new IMediaRouterServiceProxy());
             addInjector(new IPowerManagerProxy());
             addInjector(new BatteryPropertiesProxy());

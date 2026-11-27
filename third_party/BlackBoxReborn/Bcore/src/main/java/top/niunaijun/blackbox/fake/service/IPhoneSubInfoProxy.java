@@ -3,6 +3,9 @@ package top.niunaijun.blackbox.fake.service;
 import java.lang.reflect.Method;
 
 import black.android.telephony.BRTelephonyManager;
+import top.niunaijun.blackbox.BlackBoxCore;
+import top.niunaijun.blackbox.app.BActivityThread;
+import top.niunaijun.blackbox.core.CloneNetworkIdentityStore;
 import top.niunaijun.blackbox.fake.hook.ClassInvocationStub;
 import top.niunaijun.blackbox.fake.hook.MethodHook;
 import top.niunaijun.blackbox.fake.hook.ProxyMethod;
@@ -43,10 +46,25 @@ public class IPhoneSubInfoProxy extends ClassInvocationStub {
     }
 
     private static Object lineNumber(Object who, Method method, Object[] args) throws Throwable {
-        if (ITelephonyManagerProxy.isDubaiCurtainsTestProfileEnabled()) {
-            return ITelephonyManagerProxy.simulatedPhoneNumber();
+        CloneNetworkIdentityStore.Options options = ITelephonyManagerProxy.identityOptions();
+        if (ITelephonyManagerProxy.isSimProfileActive(options)) {
+            return ITelephonyManagerProxy.simulatedPhoneNumber(options);
         }
-        if (ITelephonyManagerProxy.hideSimOperatorInfo()) return null;
+        if (ITelephonyManagerProxy.shouldSuppressPhoneNumber(options)) return null;
+        return method.invoke(who, args);
+    }
+
+    private static Object simSerialNumber(Object who, Method method, Object[] args) throws Throwable {
+        CloneNetworkIdentityStore.Options options = ITelephonyManagerProxy.identityOptions();
+        if (ITelephonyManagerProxy.isSimProfileActive(options)) {
+            return VirtualDeviceIdentity.getProfileIccid(
+                    BlackBoxCore.getContext(),
+                    BActivityThread.getAppPackageName(),
+                    BActivityThread.getUserId(),
+                    options.simOperatorCode
+            );
+        }
+        if (options.hideSimOperatorInfo || options.matchProxyRegion) return null;
         return method.invoke(who, args);
     }
 
@@ -126,8 +144,7 @@ public class IPhoneSubInfoProxy extends ClassInvocationStub {
     public static class GetIccSerialNumber extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            Object platformValue = method.invoke(who, args);
-            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+            return simSerialNumber(who, method, args);
         }
     }
 
@@ -135,8 +152,7 @@ public class IPhoneSubInfoProxy extends ClassInvocationStub {
     public static class GetIccSerialNumberForSubscriber extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            Object platformValue = method.invoke(who, args);
-            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+            return simSerialNumber(who, method, args);
         }
     }
 
@@ -144,8 +160,7 @@ public class IPhoneSubInfoProxy extends ClassInvocationStub {
     public static class GetIccSerialNumberWithFeature extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            Object platformValue = method.invoke(who, args);
-            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+            return simSerialNumber(who, method, args);
         }
     }
 
@@ -185,8 +200,7 @@ public class IPhoneSubInfoProxy extends ClassInvocationStub {
     public static class GetSimSerialNumber extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            Object platformValue = method.invoke(who, args);
-            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+            return simSerialNumber(who, method, args);
         }
     }
 
@@ -194,8 +208,7 @@ public class IPhoneSubInfoProxy extends ClassInvocationStub {
     public static class GetSimSerialNumberForSubscriber extends MethodHook {
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            Object platformValue = method.invoke(who, args);
-            return ITelephonyManagerProxy.hideSimOperatorInfo() ? null : platformValue;
+            return simSerialNumber(who, method, args);
         }
     }
 }

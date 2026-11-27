@@ -224,6 +224,61 @@ public final class VirtualDeviceIdentity {
         return digits;
     }
 
+    /** Returns a stable synthetic IMSI whose MCC/MNC matches a selected SIM profile. */
+    public static String getProfileImsi(
+            Context context, String packageName, int userId, String operatorCode) {
+        if (!isValidPlmn(operatorCode)) return null;
+        int suffixLength = 15 - operatorCode.length();
+        byte[] digest = derive(context, packageName, userId, "sim_profile_imsi_" + operatorCode);
+        if (digest == null) return null;
+        return operatorCode + toDigits(digest, suffixLength);
+    }
+
+    /** Returns a stable synthetic 20-digit ICCID for a selected SIM profile. */
+    public static String getProfileIccid(
+            Context context, String packageName, int userId, String operatorCode) {
+        if (!isValidPlmn(operatorCode)) return null;
+        String prefix = "89" + operatorCode;
+        int bodyLength = 19;
+        int suffixLength = bodyLength - prefix.length();
+        byte[] digest = derive(context, packageName, userId, "sim_profile_iccid_" + operatorCode);
+        if (digest == null || suffixLength <= 0) return null;
+        return withLuhnCheckDigit(prefix + toDigits(digest, suffixLength));
+    }
+
+    /** Returns a stable pseudorandom phone number for one copy and selected country. */
+    public static String getProfilePhoneNumber(
+            Context context, String packageName, int userId, String countryIso) {
+        if (countryIso == null) return null;
+        String normalizedCountry = countryIso.trim().toLowerCase(java.util.Locale.ROOT);
+        String callingCode;
+        int nationalNumberLength;
+        switch (normalizedCountry) {
+            case "bd": callingCode = "880"; nationalNumberLength = 10; break;
+            case "br": callingCode = "55"; nationalNumberLength = 11; break;
+            case "cn": callingCode = "86"; nationalNumberLength = 11; break;
+            case "de": callingCode = "49"; nationalNumberLength = 10; break;
+            case "et": callingCode = "251"; nationalNumberLength = 9; break;
+            case "fr": callingCode = "33"; nationalNumberLength = 9; break;
+            case "in": callingCode = "91"; nationalNumberLength = 10; break;
+            case "id": callingCode = "62"; nationalNumberLength = 10; break;
+            case "ir": callingCode = "98"; nationalNumberLength = 10; break;
+            case "jp": callingCode = "81"; nationalNumberLength = 10; break;
+            case "mx": callingCode = "52"; nationalNumberLength = 10; break;
+            case "ng": callingCode = "234"; nationalNumberLength = 10; break;
+            case "pk": callingCode = "92"; nationalNumberLength = 10; break;
+            case "ru": callingCode = "7"; nationalNumberLength = 10; break;
+            case "tr": callingCode = "90"; nationalNumberLength = 10; break;
+            case "ae": callingCode = "971"; nationalNumberLength = 9; break;
+            case "us": callingCode = "1"; nationalNumberLength = 10; break;
+            default: return null;
+        }
+        byte[] digest = derive(
+                context, packageName, userId, "sim_profile_phone_" + normalizedCountry);
+        if (digest == null || nationalNumberLength <= 0) return null;
+        return "+" + callingCode + toDigits(digest, nationalNumberLength);
+    }
+
     /** Returns a stable locally administered unicast MAC address for one virtual copy. */
     public static String getNetworkMacAddress(
             Context context,
@@ -421,6 +476,10 @@ public final class VirtualDeviceIdentity {
         return true;
     }
 
+    private static boolean isValidPlmn(String operatorCode) {
+        return operatorCode != null && operatorCode.matches("[0-9]{5,6}");
+    }
+
     private static File telephonyIdFile(
             File directory, String packageName, int userId, String prefix)
             throws GeneralSecurityException {
@@ -539,18 +598,18 @@ public final class VirtualDeviceIdentity {
         return result.toString();
     }
 
-    private static String withLuhnCheckDigit(String fourteenDigits) {
+    private static String withLuhnCheckDigit(String digitsWithoutCheck) {
         int sum = 0;
-        for (int i = 0; i < fourteenDigits.length(); i++) {
-            int digit = fourteenDigits.charAt(i) - '0';
-            if ((i & 1) == 1) {
+        for (int i = 0; i < digitsWithoutCheck.length(); i++) {
+            int digit = digitsWithoutCheck.charAt(i) - '0';
+            if (((digitsWithoutCheck.length() - 1 - i) & 1) == 0) {
                 digit *= 2;
                 digit = (digit / 10) + (digit % 10);
             }
             sum += digit;
         }
         int checkDigit = (10 - (sum % 10)) % 10;
-        return fourteenDigits + checkDigit;
+        return digitsWithoutCheck + checkDigit;
     }
 
     static void clearProcessCacheForTesting() {
